@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentMake · 项目进度看板</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel-2: #1c2230;
+    --border: #262d3d;
+    --text: #e6eaf2;
+    --muted: #8b94a7;
+    --accent: #22d3ee;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --purple: #a78bfa;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    padding: 32px 24px 64px;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+
+  /* ── header ── */
+  header { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; }
+  .logo {
+    width: 46px; height: 46px; border-radius: 10px;
+    background: linear-gradient(135deg, #0ea5e9, #22d3ee 55%, #34d399);
+    display: grid; place-items: center;
+    font-weight: 800; font-size: 20px; color: #06202a;
+    box-shadow: 0 4px 18px rgba(34, 211, 238, .25);
+  }
+  h1 { font-size: 22px; letter-spacing: .5px; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .tag {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; margin-left: auto;
+    background: rgba(52, 211, 153, .12); color: var(--green);
+    border: 1px solid rgba(52, 211, 153, .35);
+  }
+
+  /* ── overview grid ── */
+  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin: 20px 0; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px;
+  }
+  .card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 10px; font-weight: 600; }
+
+  .metric { display: flex; align-items: center; gap: 16px; }
+  .donut { position: relative; width: 84px; height: 84px; flex-shrink: 0; }
+  .donut svg { transform: rotate(-90deg); }
+  .donut .num {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    font-size: 18px; font-weight: 700;
+  }
+  .metric .desc { font-size: 12px; color: var(--muted); }
+  .metric .desc b { color: var(--text); font-size: 13px; display: block; margin-bottom: 2px; }
+
+  /* ── section title ── */
+  .sec { margin: 30px 0 12px; display: flex; align-items: baseline; gap: 10px; }
+  .sec h2 { font-size: 16px; }
+  .sec .note { font-size: 12px; color: var(--muted); }
+
+  /* ── phase list ── */
+  .phase {
+    display: grid; grid-template-columns: 130px 1fr 44px; align-items: center;
+    gap: 14px; padding: 10px 14px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--border);
+    margin-bottom: 8px;
+  }
+  .phase .name { font-size: 13px; font-weight: 600; }
+  .phase .name small { display: block; color: var(--muted); font-weight: 400; font-size: 11px; margin-top: 1px; }
+  .phase .bar { height: 10px; border-radius: 6px; background: #242b3a; overflow: hidden; position: relative; }
+  .phase .bar i { display: block; height: 100%; border-radius: 6px; transition: width .8s ease; }
+  .phase .pct { font-size: 13px; font-weight: 700; text-align: right; }
+  .phase .flags { grid-column: 2 / 4; font-size: 11.5px; color: var(--muted); padding-left: 2px; }
+  .phase .flags .ok { color: var(--green); }
+  .phase .flags .no { color: var(--muted); text-decoration: line-through; text-decoration-color: rgba(248,113,113,.6); }
+
+  .fill-done { background: linear-gradient(90deg, #0ea5e9, #22d3ee); }
+  .fill-part { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+  .fill-none { background: #343c4f; }
+
+  /* ── module bars ── */
+  .mod {
+    display: grid; grid-template-columns: 96px 1fr 40px; align-items: center;
+    gap: 12px; padding: 9px 12px; margin-bottom: 6px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    font-size: 13px;
+  }
+  .mod .mname { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .mod .mbar { height: 8px; border-radius: 5px; background: #242b3a; overflow: hidden; }
+  .mod .mbar i { display: block; height: 100%; border-radius: 5px; }
+  .mod .mpct { font-size: 12px; font-weight: 700; text-align: right; }
+  .mod .files { grid-column: 2 / 4; font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  /* ── test cards ── */
+  .tests { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+  .tcard { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .tcard .top { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px rgba(52,211,153,.6); }
+  .tcard .tname { font-size: 13px; font-weight: 600; }
+  .tcard .tdesc { font-size: 11.5px; color: var(--muted); }
+  .tcard .trs { margin-top: 8px; font-size: 11.5px; color: var(--green); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  /* ── issues ── */
+  .issue { display: flex; gap: 12px; padding: 10px 14px; margin-bottom: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; font-size: 13px; align-items: flex-start; }
+  .sev { flex-shrink: 0; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px; margin-top: 1px; }
+  .sev.hi { background: rgba(248,113,113,.14); color: var(--red); border: 1px solid rgba(248,113,113,.35); }
+  .sev.mid { background: rgba(251,191,36,.12); color: var(--amber); border: 1px solid rgba(251,191,36,.35); }
+  .sev.lo { background: rgba(167,139,250,.12); color: var(--purple); border: 1px solid rgba(167,139,250,.35); }
+  .issue .body b { font-size: 12.5px; }
+  .issue .body p { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  /* ── legend / footer ── */
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 18px 0 4px; font-size: 12px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  footer { margin-top: 36px; color: #5b6478; font-size: 11.5px; text-align: center; }
+  .hl { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo">AM</div>
+    <div>
+      <h1>AgentMake · 项目进度看板</h1>
+      <div class="sub">Agent 可视化调试器 — 拦截式观测任意 JS agent · 生成于 2026-08-14 · 数据来自实测（单测 + 3 组 e2e 全绿）</div>
+    </div>
+    <span class="tag">● 核心主线可用</span>
+  </header>
+
+  <!-- ── 总览 ── -->
+  <div class="grid">
+    <div class="card">
+      <h3>核心调试主线</h3>
+      <div class="metric">
+        <div class="donut">
+          <svg width="84" height="84" viewBox="0 0 84 84">
+            <circle cx="42" cy="42" r="34" fill="none" stroke="#242b3a" stroke-width="9"/>
+            <circle cx="42" cy="42" r="34" fill="none" stroke="url(#g1)" stroke-width="9"
+                    stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="0"/>
+            <defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#0ea5e9"/><stop offset="100%" stop-color="#34d399"/>
+            </linearGradient></defs>
+          </svg>
+          <div class="num">100%</div>
+        </div>
+        <div class="desc"><b>拦截 → 观测 → 图 → 断点 → 重放 → MCP</b>六段链路全部跑通，行为有 e2e 断言锁定</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>全量路线图</h3>
+      <div class="metric">
+        <div class="donut">
+          <svg width="84" height="84" viewBox="0 0 84 84">
+            <circle cx="42" cy="42" r="34" fill="none" stroke="#242b3a" stroke-width="9"/>
+            <circle cx="42" cy="42" r="34" fill="none" stroke="url(#g2)" stroke-width="9"
+                    stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="80.1"/>
+            <defs><linearGradient id="g2" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#fbbf24"/>
+            </linearGradient></defs>
+          </svg>
+          <div class="num">63%</div>
+        </div>
+        <div class="desc"><b>8 个阶段位已完成 5 个</b>（0/1/2/4/4.5）<br>缺：Phase 3 源码回写 · Phase 5 画布 · Phase 6 打磨</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>代码量 & 依赖</h3>
+      <div class="metric" style="flex-direction:column; align-items:flex-start; gap:6px;">
+        <div style="font-size:26px; font-weight:800;">≈ 4,670 <span style="font-size:13px; color:var(--muted); font-weight:400;">行 TS/JS</span></div>
+        <div class="desc"><b style="display:inline; font-size:12px;">npm 运行时依赖 = 0</b>（node:http / node:sqlite / 原生 TS 剥离）<br>Node ≥ 22.6，无构建步骤</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 阶段路线图 ── -->
+  <div class="sec"><h2>📌 阶段路线图</h2><span class="note">README 声明的完成度与本看板一致：Phase 0–2 + 4 + 4.5</span></div>
+
+  <div class="phase"><div class="name">Phase 0 · 拦截<small>fetch 包装 · 协议识别</small></div>
+    <div class="bar"><i class="fill-done" style="width:100%"></i></div><div class="pct" style="color:var(--green)">100%</div>
+    <div class="flags">包装 <span class="ok">globalThis.fetch</span> · 路径形状识别 Gemini / OpenAI 兼容 / Anthropic · 只收 body 不收 header（密钥零泄漏）</div></div>
+
+  <div class="phase"><div class="name">Phase 1 · 观测<small>归一化 IR</small></div>
+    <div class="bar"><i class="fill-done" style="width:100%"></i></div><div class="pct" style="color:var(--green)">100%</div>
+    <div class="flags">三家协议归一为统一 IR · 展示<span class="ok">实际发出的 prompt</span> / 响应 / token / 耗时 · 保留原始请求体对照</div></div>
+
+  <div class="phase"><div class="name">Phase 2 · 执行图<small>调用栈推导</small></div>
+    <div class="bar"><i class="fill-done" style="width:100%"></i></div><div class="pct" style="color:var(--green)">100%</div>
+    <div class="flags">async stack traces 推导调用树 · 穿透 <span class="ok">Promise.all / mapLimit / withRetry</span> · 非 LLM HTTP 调用并入（否则单点图）· 只显示跑过的路径</div></div>
+
+  <div class="phase"><div class="name">Phase 3 · 源码回写<small>坐标解析 · 可回写性</small></div>
+    <div class="bar"><i class="fill-none" style="width:0%"></i></div><div class="pct" style="color:var(--muted)">0%</div>
+    <div class="flags"><span class="no">把改好的 prompt 落回 .js 源码</span> —— 文档里「最难的部分」，尚未动工</div></div>
+
+  <div class="phase"><div class="name">Phase 4 · 断点与重放<small>阻塞式调试</small></div>
+    <div class="bar"><i class="fill-done" style="width:100%"></i></div><div class="pct" style="color:var(--green)">100%</div>
+    <div class="flags"><span class="ok">四位置断点</span>（llm.before/after · http.before/after）· 改 prompt / 伪造响应 / 改回答 / 伪造工具返回 · 单步 · 内容寻址重放缓存（改哪次只重跑哪次）· 运行对比定位分歧点</div></div>
+
+  <div class="phase"><div class="name">Phase 4.5 · MCP<small>给 AI 的感官与手</small></div>
+    <div class="bar"><i class="fill-done" style="width:100%"></i></div><div class="pct" style="color:var(--green)">100%</div>
+    <div class="flags"><span class="ok">11 个工具</span>：find_failures / get_call / compare_runs / set_breakpoint / resume / get_attach_command… · 摘要优先 + maxChars 截断 · 刻意不提供 get_full_trace</div></div>
+
+  <div class="phase"><div class="name">Phase 5 · 画布创作<small>从零画 agent</small></div>
+    <div class="bar"><i class="fill-none" style="width:0%"></i></div><div class="pct" style="color:var(--muted)">0%</div>
+    <div class="flags"><span class="no">画布 → 代码生成</span> —— 未开始</div></div>
+
+  <div class="phase"><div class="name">Phase 6 · 打磨<small>补全与体验</small></div>
+    <div class="bar"><i class="fill-part" style="width:40%"></i></div><div class="pct" style="color:var(--amber)">40%</div>
+    <div class="flags"><span class="ok">OpenAI 兼容协议 ✓ · 非 LangGraph 兜底模式 ✓</span>　<span class="no">流式响应解析 ✗ · 时间线视图 ✗ · 覆盖率视图 ✗ · 批量回归 ✗ · 导出报告 ✗</span></div></div>
+
+  <div class="legend">
+    <span><i class="sw" style="background:linear-gradient(90deg,#0ea5e9,#22d3ee)"></i>已完成</span>
+    <span><i class="sw" style="background:linear-gradient(90deg,#f59e0b,#fbbf24)"></i>部分完成</span>
+    <span><i class="sw" style="background:#343c4f"></i>未开始</span>
+  </div>
+
+  <!-- ── 模块完成度 ── -->
+  <div class="sec"><h2>🧩 模块完成度</h2><span class="note">按 src/ 目录（~4,670 行）</span></div>
+
+  <div class="mod"><div class="mname">shared/</div><div class="mbar"><i class="fill-done" style="width:100%"></i></div><div class="mpct" style="color:var(--green)">100%</div>
+    <div class="files">classify.ts · normalize.ts · denormalize.ts（保守合并，9 条单测）· hash.ts · stack.ts · types.ts</div></div>
+
+  <div class="mod"><div class="mname">harness/</div><div class="mbar"><i class="fill-done" style="width:100%"></i></div><div class="mpct" style="color:var(--green)">100%</div>
+    <div class="files">register.ts（--import 入口）· intercept.ts（fetch 包装）· gate.ts · transport.ts · replay.ts</div></div>
+
+  <div class="mod"><div class="mname">server/</div><div class="mbar"><i class="fill-done" style="width:100%"></i></div><div class="mpct" style="color:var(--green)">100%</div>
+    <div class="files">index.ts（REST+SSE）· store.ts（node:sqlite WAL）· gate.ts（断点闸门）· graph.ts（执行图）· compare.ts</div></div>
+
+  <div class="mod"><div class="mname">mcp/</div><div class="mbar"><i class="fill-done" style="width:100%"></i></div><div class="mpct" style="color:var(--green)">100%</div>
+    <div class="files">server.ts（手写 JSON-RPC）· tools.ts（11 个工具，token 预算控制）</div></div>
+
+  <div class="mod"><div class="mname">web/</div><div class="mbar"><i class="fill-part" style="width:90%"></i></div><div class="mpct" style="color:var(--amber)">90%</div>
+    <div class="files">index.html · app.js（SSE 实时列表）· graph.js（SVG 执行图画布）· style.css — 缺时间线视图</div></div>
+
+  <div class="mod"><div class="mname">test/</div><div class="mbar"><i class="fill-done" style="width:100%"></i></div><div class="mpct" style="color:var(--green)">100%</div>
+    <div class="files">10 条单测 + 3 组 e2e 全部通过（breakpoint / mcp / replay）</div></div>
+
+  <div class="mod"><div class="mname">cli.ts</div><div class="mbar"><i class="fill-none" style="width:0%"></i></div><div class="mpct" style="color:var(--red)">0%</div>
+    <div class="files">⚠️ package.json 声明 bin 指向 src/cli.ts，但文件不存在 —— CLI 入口缺失</div></div>
+
+  <div class="mod"><div class="mname">docs/</div><div class="mbar"><i class="fill-part" style="width:60%"></i></div><div class="mpct" style="color:var(--amber)">60%</div>
+    <div class="files">ARCHITECTURE.md 是 Python/LangGraph 路线的 v0.5 设计稿，与 JS 拦截式实现已分叉 —— 需要对齐更新</div></div>
+
+  <!-- ── 测试状态 ── -->
+  <div class="sec"><h2>🧪 测试状态</h2><span class="note">本次实测：4 组全部通过</span></div>
+
+  <div class="tests">
+    <div class="tcard"><div class="top"><span class="dot"></span><span class="tname">denormalize.test.ts</span></div>
+      <div class="tdesc">改写逻辑单测：保守合并 / 非文本内容保全（图片、tool_result、cache_control）</div>
+      <div class="trs">10 / 10 通过</div></div>
+    <div class="tcard"><div class="top"><span class="dot"></span><span class="tname">breakpoint.e2e.mjs</span></div>
+      <div class="tdesc">改 prompt · 伪造响应 · 断点关闭零开销 · 改模型回答 · 伪造工具 503 · 单步</div>
+      <div class="trs">6 组场景全过</div></div>
+    <div class="tcard"><div class="top"><span class="dot"></span><span class="tname">mcp.e2e.mjs</span></div>
+      <div class="tdesc">AI 通过 MCP 改的 prompt 真的到达模型（e2e 断言，非日志自证）</div>
+      <div class="trs">全过</div></div>
+    <div class="tcard"><div class="top"><span class="dot"></span><span class="tname">replay.e2e.mjs</span></div>
+      <div class="tdesc">缓存命中不花钱 · 改动穿透缓存 · compare 定位第一分歧点</div>
+      <div class="trs">全过</div></div>
+  </div>
+
+  <!-- ── 待办与隐患 ── -->
+  <div class="sec"><h2>🚧 待办与隐患</h2><span class="note">建议按优先级处理</span></div>
+
+  <div class="issue"><span class="sev hi">高</span><div class="body">
+    <b>cli.ts 缺失</b><p>package.json 声明 bin 指向 ./src/cli.ts，文件不存在 —— npm link / 安装即坏</p></div></div>
+  <div class="issue"><span class="sev hi">高</span><div class="body">
+    <b>.mcp.json 路径过期</b><p>指向旧路径 ~/AI/agentmake/...，项目已迁至 Desktop/deepseekhsh —— Claude Code 按此配置接不上 MCP</p></div></div>
+  <div class="issue"><span class="sev mid">中</span><div class="body">
+    <b>旧项目副本仍在</b><p>~/AI/agentmake 的旧服务器一直占着 8787 端口（本次已停）；两处代码可能漂移，建议确认后清理</p></div></div>
+  <div class="issue"><span class="sev mid">中</span><div class="body">
+    <b>不是 git 仓库</b><p>无版本历史，改坏无法回退</p></div></div>
+  <div class="issue"><span class="sev lo">低</span><div class="body">
+    <b>测试脚本覆盖不全</b><p>npm test 只跑单测；test:e2e 脚本漏了 replay.e2e.mjs</p></div></div>
+
+  <!-- ── 架构分叉提示 ── -->
+  <div class="sec"><h2>🧭 方向提示</h2></div>
+  <div class="card" style="font-size:13px; color:var(--muted);">
+    架构文档是 <b style="color:var(--text)">Python / LangGraph</b> 路线的 v0.5 设计稿（React+FastAPI、六类断点、时间旅行、LibCST 回写、画布），
+    而实际实现走的是文档 §5.5 一句话带过的<b style="color:var(--text)">「非 LangGraph 兜底模式」</b>：JS + fetch 拦截 + 调用栈推导执行图 —— 更通用，但文档已超前于实现。
+    继续推进前需明确：<span class="hl">JS 拦截式自成一派（更新文档）</span>，还是<span class="hl">回归 LangGraph 路线</span>。
+  </div>
+
+  <footer>AgentMake · progress dashboard · 数据截至 2026-08-14 · 生成于 DeepSeek Harness</footer>
+</div>
+</body>
+</html>

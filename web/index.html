@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AgentMake · Agent 监视屏</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+<!-- 顶栏只放「我在看哪次运行」和「怎么让它停下来」。
+     四个阶段的断点开关是调试器的内部模型，不该是用户看到的第一屏 —— 收进「更多」。 -->
+<header>
+  <span class="brand">AgentMake</span>
+  <span id="status" class="pill pill-off">未连接</span>
+  <select id="runPicker" title="选择要看哪一次运行"></select>
+  <span class="spacer"></span>
+  <button id="bpNext" class="btn big" title="下一次 agent 调模型时把它停住，让你改 prompt 或伪造回答">
+    ⏸ 停在下一次模型调用
+  </button>
+  <button id="moreBtn" class="btn ghost" title="断点的细分阶段、规格对账、函数调用图">更多 ▾</button>
+</header>
+
+<!-- 已导入的项目：▶ 就能跑，启动命令一直摆在明面上，认错了直接改 -->
+<div id="projWrap">
+  <div id="projBar" hidden></div>
+  <button id="addProject" class="btn ghost">+ 导入项目</button>
+</div>
+
+<!-- 「更多」抽屉：高级项都在这里，不占第一屏 -->
+<div id="morePanel" hidden>
+  <div class="mrow">
+    <span class="mlbl">停在哪一步</span>
+    <label class="bpToggle" title="模型调用发出前 —— 改 prompt、伪造回答、中止">
+      <input type="checkbox" id="bp_llmBefore" /> <span>模型调用前</span></label>
+    <label class="bpToggle" title="模型答完、你的代码还没看到 —— 改回答，测下游怎么处理异常输出">
+      <input type="checkbox" id="bp_llmAfter" /> <span>模型答完后</span></label>
+    <label class="bpToggle" title="调工具/抓数据之前 —— 伪造返回值，不用真去制造故障">
+      <input type="checkbox" id="bp_httpBefore" /> <span>调工具前</span></label>
+    <label class="bpToggle" title="工具返回后 —— 改返回值">
+      <input type="checkbox" id="bp_httpAfter" /> <span>工具返回后</span></label>
+    <label class="bpToggle" title="停一次之后自动关掉，不会一直拦"><input type="checkbox" id="bpOnce" /> <span>只停一次</span></label>
+    <input id="bpUrl" class="bpUrl" type="text" placeholder="只拦网址里含这段的（调工具时建议填）" />
+  </div>
+  <div class="mrow">
+    <span class="mlbl">换个看法</span>
+    <span class="seg">
+      <button id="tabFlow" class="segbtn on" title="它实际做了什么">流程</button>
+      <button id="tabSpec" class="segbtn" title="你以为它怎么跑 —— 和实际对账">规格对账</button>
+      <button id="tabGraph" class="segbtn" title="函数之间的调用关系（技术视角）">函数调用图</button>
+      <button id="tabVerify" class="segbtn" title="改完重放，和基线逐步对齐；拿历史请求批量回归">验证</button>
+    </span>
+    <button id="fit" class="btn" hidden>复位视图</button>
+  </div>
+</div>
+
+<main>
+  <!-- 「需要你看的」：自动发现的异常，按影响排序。点一条，图上只亮出相关路径 -->
+  <aside id="alerts" aria-label="需要你看的"></aside>
+
+  <section id="left">
+    <!-- 这一条回答用户打开页面的第一个问题：我的 agent 刚才到底干了什么 -->
+    <div id="summary" class="summary"></div>
+
+    <div id="flowWrap"><div id="flow"></div></div>
+
+    <!-- 验证：改完重放，和基线逐步对齐；拿历史请求批量回归 -->
+    <div id="verifyWrap" hidden></div>
+
+    <!-- 点节点或异常时出现：同一步在各个请求里的表现，规律一眼可见 -->
+    <div id="compare" hidden></div>
+    <div id="canvasWrap" hidden><svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg></div>
+
+    <!-- 按请求分泳道的实时时间线：并发一眼可见，卡住的调用会一直往右长 -->
+    <div id="timeline" hidden></div>
+
+    <div id="specWrap" hidden>
+      <div class="specbar">
+        <input id="specGoal" placeholder="这个 agent 要做什么（一句话）—— 会作为规格交给 AI" />
+        <button id="specDraft" class="btn" title="用最近一次实际运行的结构生成规格草稿">按实际运行生成草稿</button>
+        <button id="specAdd" class="btn">+ 加一步</button>
+        <button id="specSave" class="btn">保存规格</button>
+      </div>
+      <div id="specDiff"></div>
+      <div id="specSteps"></div>
+    </div>
+
+    <!-- 调用清单默认收起：流程图已经把结构说清楚了，一条条列出来是给排查用的 -->
+    <details id="callsBox">
+      <summary>
+        <span id="callsTitle">全部调用</span>
+        <span id="filterTag" class="tag" hidden></span>
+        <label class="follow" onclick="event.stopPropagation()"><input type="checkbox" id="follow" checked /> 跟随</label>
+      </summary>
+      <ul id="calls"></ul>
+    </details>
+
+    <details id="procBox" hidden>
+      <summary><span id="procTitle">输出</span></summary>
+      <pre id="procLog"></pre>
+    </details>
+
+    <div id="empty" class="empty">
+      <p class="bigline" id="emptyTitle">先导入一个项目</p>
+      <p class="hint" id="emptyHint">选中你的工程目录，我会认出入口并加上探针 —— <b>你的代码一行都不用改</b>。</p>
+      <button id="addProject2" class="btn primary big">+ 导入项目</button>
+
+      <details class="manual">
+        <summary>或者自己在终端里启动</summary>
+        <span class="seg attach">
+          <button class="segbtn on" data-attach="node">Node</button>
+          <button class="segbtn" data-attach="python">Python</button>
+          <button class="segbtn" data-attach="other">其它语言</button>
+        </span>
+        <pre id="cmd"></pre>
+        <p id="cmdNote" class="hint"></p>
+      </details>
+    </div>
+  </section>
+
+  <section id="detailPane">
+    <div class="placeholder">
+      <p class="bigline">点左边任意一步</p>
+      <p>这里会显示它<strong>实际发出去的完整 prompt</strong> —— 模板拼接、列表截断、变量展开之后的最终形态。</p>
+    </div>
+  </section>
+
+  <section id="breakPane" hidden>
+    <div class="bp-head">
+      <span class="bp-dot"></span>
+      <strong id="bpTitle">已暂停</strong>
+      <span id="bpMeta" class="dimtext"></span>
+      <span class="spacer"></span>
+      <span id="bpWait" class="dimtext"></span>
+    </div>
+    <p id="bpHelp" class="bp-help"></p>
+    <div class="bp-body">
+      <!-- 请求侧（llm.before） -->
+      <div id="bpReqSide">
+        <label class="fld"><span>系统提示词（改了会真的发给模型）</span><textarea id="bpSystem" rows="8"></textarea></label>
+        <div id="bpMsgs"></div>
+        <label class="fld"><span>模型</span><input id="bpModel" type="text" /></label>
+        <label class="fld"><span>参数（JSON）</span><textarea id="bpParams" rows="3"></textarea></label>
+      </div>
+      <!-- 响应侧（llm.after） -->
+      <div id="bpResSide" hidden>
+        <label class="fld"><span>模型的回答（改了之后你的代码会拿到改过的版本）</span><textarea id="bpRespText" rows="12"></textarea></label>
+        <div id="bpRespTools"></div>
+      </div>
+      <!-- 工具侧（http.*） -->
+      <div id="bpHttpSide" hidden>
+        <label class="fld"><span>请求</span><pre id="bpHttpInfo"></pre></label>
+        <label class="fld"><span>HTTP 状态码</span><input id="bpHttpStatus" type="text" value="200" /></label>
+        <label class="fld"><span>响应体</span><textarea id="bpHttpBody" rows="8"></textarea></label>
+      </div>
+      <label class="fld" id="bpFakeWrap" hidden>
+        <span>直接编一个回答（模型不会被调用，也不花钱）</span><textarea id="bpFake" rows="4"></textarea>
+      </label>
+    </div>
+    <div class="bp-actions">
+      <button id="bpGo"      class="btn primary">按我改的发出去</button>
+      <button id="bpPass"    class="btn">原样放行</button>
+      <button id="bpStep"    class="btn" title="放行后立刻停在下一次同类调用">放行并停下一次</button>
+      <button id="bpFakeBtn" class="btn">编个回答…</button>
+      <button id="bpAbort"   class="btn danger">让这次调用失败</button>
+    </div>
+  </section>
+</main>
+
+<!-- 导入向导：目录树由服务端提供（浏览器的目录选择器拿不到真实绝对路径） -->
+<div id="picker" hidden>
+  <div class="pkbox">
+    <div class="pkhead">
+      <strong>选择工程目录</strong>
+      <span class="spacer"></span>
+      <button id="pkClose" class="btn ghost">✕</button>
+    </div>
+    <input id="pkPath" class="pkpath" spellcheck="false" placeholder="也可以直接粘路径" />
+    <div id="pkList" class="pklist"></div>
+    <div class="pkfoot">
+      <label class="fld"><span>启动命令（认错了就改这里）</span>
+        <input id="pkCmd" spellcheck="false" /></label>
+      <p id="pkNote" class="hint"></p>
+      <div class="pkbtns">
+        <button id="pkConfirm" class="btn primary" disabled>导入这个目录</button>
+        <button id="pkCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

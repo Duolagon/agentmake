@@ -1,0 +1,31 @@
+{
+  "name": "agentmake",
+  "version": "0.1.0",
+  "description": "Agent 可视化调试器 —— 拦截式观测任意 JS agent 的内部执行",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.6"
+  },
+  "bin": {
+    "agentmake": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "node src/cli.ts",
+    "serve": "node src/server/index.ts",
+    "dev": "node --watch src/server/index.ts",
+    "mcp": "node src/mcp/server.ts",
+    "test": "node --test test/denormalize.test.ts test/jsscan.test.ts test/writeback.test.ts test/flow.test.ts test/spec.test.ts test/toolcalls.test.ts test/scores.test.ts test/runs.test.ts test/dataflow.test.ts test/trace.test.ts test/verify.test.ts test/protocols.test.ts",
+    "test:e2e": "node test/run-e2e.mjs",
+    "test:all": "npm run test && npm run test:e2e"
+  },
+  "dependencies": {
+    "acorn": "^8.18.0",
+    "acorn-walk": "^8.3.5"
+  },
+  "optionalDependencies": {
+    "@langfuse/otel": "^5.11.0",
+    "@langfuse/tracing": "^5.11.0",
+    "@opentelemetry/sdk-node": "^0.222.0"
+  }
+}
