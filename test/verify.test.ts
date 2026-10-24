@@ -155,3 +155,34 @@ test('回归：找不到在跑的目标、或基线下没有记下请求时，�
   const r2 = startRegression({ ...deps, requestRuns: () => [{ request_url: '/t', run_id: 'x' }] as never }, { baseline: 'A' });
   assert.match((r2 as { error: string }).error, /找不到改好之后在跑的服务/);
 });
+
+test('★ 两个文件里各有一个 analyze()：分开对齐，一个变了不会被另一个盖成「没变」', () => {
+  const two = (id: string, outB: string) => {
+    const f = (file: string, line: number) => JSON.stringify([{ fn: 'handle', file: '/app/main.mjs', line, col: 1 }, { fn: 'analyze', file, line: 7, col: 1 }, { fn: 'chat', file: '/app/llm.mjs', line: 5, col: 1 }]);
+    return [
+      row(id, 'llm', [], { frames: f('/app/a.mjs', 10), system: 'a', messages: '[]', response_text: '甲的结论', request_hash: 'ha' }),
+      row(id, 'llm', [], { frames: f('/app/b.mjs', 11), system: 'b', messages: '[]', response_text: outB, request_hash: 'hb' }),
+    ];
+  };
+  const v = verifyRuns(side('A', two('A', '乙的旧结论')), side('B', two('B', '乙的新结论')));
+  const analyze = v.pairs.filter((p) => p.label === 'analyze');
+  assert.equal(analyze.length, 2, '两个 analyze 各占一行');
+  assert.deepEqual(analyze.map((p) => p.status).sort(), ['changed', 'same']);
+});
+
+test('回归：基线可以是运行组（组不是一行 runs，以前直接报「没有这个运行」）', () => {
+  const seenAnchor: string[] = [];
+  const deps = {
+    requestRuns: (id: string) => (id === 'grp' ? [{ run_id: 'r1', request_url: '/t', request_method: 'POST' }, { run_id: 'r2', request_url: '/t', request_method: 'POST' }] : []) as never,
+    getRun: () => undefined,
+    findTarget: (id: string) => { seenAnchor.push(id); return undefined; },
+    findReplayRun: () => undefined,
+    analyze: () => ({ flow: buildFlow([], []), anomalies: [] }),
+    verify: () => ({}) as never,
+    broadcast: () => {},
+  };
+  const r = startRegression(deps, { baseline: 'grp' });
+  assert.match((r as { error: string }).error, /找不到改好之后在跑的服务/, '过了「基线存在」这一关');
+  assert.deepEqual(seenAnchor, ['r2'], '用组里最后一个请求去找目标进程');
+  assert.match((startRegression(deps, { baseline: 'nope' }) as { error: string }).error, /没有这个运行或运行组/);
+});

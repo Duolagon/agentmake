@@ -55,7 +55,16 @@ function stateOf(id: string): LoopState {
 }
 
 /** 条件钩子：同步，返回最终的循环条件 */
-export function loopTest(id: string, original: boolean): boolean {
+export function loopTest(id: string, original: unknown): unknown {
+  try {
+    return decide(id, original);
+  } catch {
+    return original; // 插桩绝不能把用户的循环搞崩，更不能改变它的语义
+  }
+}
+
+/** 没有覆写时原样返回原条件的值（不转成布尔，undefined 就还是 undefined） */
+function decide(id: string, original: unknown): unknown {
   const s = stateOf(id);
   const o = overrides.get(id) ?? {};
 

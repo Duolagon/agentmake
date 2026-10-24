@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { analyze } from '../src/server/writability.ts';
-import { applyEdit } from '../src/server/patch.ts';
+import { applyEdit, applyEdits, revert } from '../src/server/patch.ts';
 
 const tmp = mkdtempSync(path.join(tmpdir(), 'am-wb-'));
 let n = 0;
@@ -132,4 +132,92 @@ test('模板片段回写只改该片段，插值原样保留', () => {
   const res = applyEdit({ file: f, ...r.segments[0], newText: '新前缀：', fileHash: r.fileHash! });
   assert.ok(res.ok, res.error);
   assert.equal(readFileSync(f, 'utf8'), 'export const p = (a) => `新前缀：${a} 后缀`;');
+});
+
+// ── 同文件多处相同文本：按调用位置选，选不出就不给一键回写 ──
+
+const TWO = [
+  'export function a() {',          // 1
+  "  const p = '同一句提示词';",     // 2
+  '  return call(p);',               // 3
+  '}',                               // 4
+  'export function b() {',          // 5
+  "  const p = '同一句提示词';",     // 6
+  '  return call(p);',               // 7
+  '}',                               // 8
+].join('\n');
+
+test('同文件两处相同 prompt：选调用点所在函数里的那一处，不是第一处', () => {
+  const f = fixture(TWO);
+  const r = analyze('同一句提示词', [{ file: f, line: 7 }]);
+  assert.equal(r.writability, 'static_literal');
+  assert.equal(r.line, 6, '调用发生在 b() 里，应该定位到第 6 行');
+  assert.equal(analyze('同一句提示词', [{ file: f, line: 3 }]).line, 2);
+});
+
+test('同文件两处相同 prompt、没有行号：判断不出就不给一键回写', () => {
+  const f = fixture(TWO);
+  const r = analyze('同一句提示词', [f]);
+  assert.equal(r.segments.length, 0, '不能默认选第一处');
+  assert.match(r.note, /2 处一样的文本/);
+});
+
+test('同文件两处相同模板：同样按调用位置选', () => {
+  const f = fixture([
+    'export function a(x) {',
+    '  return call(`你好，${x}，请回答`);',
+    '}',
+    'export function b(x) {',
+    '  return call(`你好，${x}，请回答`);',
+    '}',
+  ].join('\n'));
+  const r = analyze('你好，张三，请回答', [{ file: f, line: 5 }]);
+  assert.equal(r.writability, 'static_composed');
+  assert.equal(r.line, 5);
+});
+
+// ── 多段原子写入 ──
+
+test('★ 模板的几段一次写入，撤销回到改之前的原样（不是只撤最后一段）', () => {
+  const orig = 'export const p = (x) => `开头的提示，${x}，结尾的提示`;\n';
+  const f = fixture(orig);
+  const r = analyze('开头的提示，张三，结尾的提示', [f]);
+  assert.equal(r.segments.length, 2);
+  const res = applyEdits({
+    file: f, fileHash: r.fileHash!,
+    edits: [
+      { start: r.segments[0].start, end: r.segments[0].end, newText: '新开头，' },
+      { start: r.segments[1].start, end: r.segments[1].end, newText: '，新结尾' },
+    ],
+  });
+  assert.ok(res.ok, res.error);
+  assert.equal(readFileSync(f, 'utf8'), 'export const p = (x) => `新开头，${x}，新结尾`;\n');
+  assert.ok(revert(f, res.backup!).ok);
+  assert.equal(readFileSync(f, 'utf8'), orig, '撤销后一个字节都不差');
+});
+
+test('★ 有一段不合格，整批都不写（不会留下改了一半的文件）', () => {
+  const orig = "const a = '甲';\nconst b = '乙';\n";
+  const f = fixture(orig);
+  const ra = analyze('甲', [f]);
+  const res = applyEdits({
+    file: f,
+    edits: [
+      { start: ra.segments[0].start, end: ra.segments[0].end, newText: '改过的甲' },
+      { start: 999, end: 1000, newText: '越界' },
+    ],
+  });
+  assert.equal(res.ok, false);
+  assert.equal(readFileSync(f, 'utf8'), orig);
+});
+
+test('多段里有一段要换行：升级成模板，其余段的坐标照样对', () => {
+  const f = fixture("const a = '一';\nconst b = '二';\n");
+  const lits = [analyze('一', [f]).segments[0], analyze('二', [f]).segments[0]];
+  const res = applyEdits({ file: f, edits: [
+    { start: lits[0].start, end: lits[0].end, newText: '第一行\n第二行' },
+    { start: lits[1].start, end: lits[1].end, newText: '二改' },
+  ] });
+  assert.ok(res.ok, res.error);
+  assert.equal(readFileSync(f, 'utf8'), "const a = `第一行\n第二行`;\nconst b = '二改';\n");
 });

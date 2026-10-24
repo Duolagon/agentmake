@@ -69,15 +69,25 @@ export function transformLoops(src: string, filename: string): TransformResult {
     const id = `${filename}:${line}`;
     loops.push({ id, line, endLine, kind: node.type });
 
-    // 只有在 async 函数体内才能 await；否则退化成同步上报（仍支持跳出/改上限）
-    const canAwait = ancestors.some(
-      (a) => (a.type === 'FunctionDeclaration' || a.type === 'FunctionExpression' || a.type === 'ArrowFunctionExpression') && a.async,
-    ) || ancestors.every((a) => a.type === 'Program' || a.type === 'ExpressionStatement'); // 顶层 await
+    // 只有**最近一层**函数是 async 才能 await；否则退化成同步上报（仍支持跳出/改上限）。
+    // 不能看任意一层祖先：async 函数里的普通回调（arr.some(x => { for… })）不能 await，
+    // 插了 await 整个文件就解析失败、全部放弃插桩。顶层循环同样走同步上报。
+    const fn = ancestors.findLast(
+      (a) => a !== node && (a.type === 'FunctionDeclaration' || a.type === 'FunctionExpression' || a.type === 'ArrowFunctionExpression'),
+    );
+    const canAwait = Boolean(fn?.async);
 
-    // ① 条件位置：包一层，可被覆写
+    // ① 条件位置：包一层，可被覆写。
+    // 钩子没装上时必须原样求值原条件 —— 不能写成 `__am_test?.(…)??true`：
+    // 原条件是 undefined / null 时那样会变成 true，本来一轮都不跑的循环被插桩跑起来。
+    // 原条件作为实参在外层求值（只求值一次，await / yield / this 都照旧），
+    // 只插入不替换，条件里嵌套的循环各自的插入点不受影响。
     if (node.test) {
-      edits.push({ from: node.test.start, to: node.test.start, text: `globalThis.__am_test?.(${JSON.stringify(id)},(` });
-      edits.push({ from: node.test.end, to: node.test.end, text: `))??true` });
+      edits.push({
+        at: node.test.start,
+        text: `((v)=>globalThis.__am_test?globalThis.__am_test(${JSON.stringify(id)},v):v)((`,
+      });
+      edits.push({ at: node.test.end, text: `))` });
     } else if (node.type === 'ForStatement') {
       // for(;;) 无条件：插一个纯钩子条件
       edits.push({ at: node.start + 'for('.length, text: '' }); // 占位，实际由 body 守卫处理

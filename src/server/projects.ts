@@ -10,6 +10,7 @@
 
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -164,6 +165,9 @@ export function start(
   st.exitCode = null;
   st.url = null;
 
+  // 目录不在了（项目被移走 / 删了）—— 直接说清楚，不要变成一个「在跑」的空壳
+  if (!existsSync(p.dir)) return { ok: false, error: `项目目录不存在：${p.dir}` };
+
   let child: ChildProcess;
   try {
     // 走 shell：用户填的是一条命令行（可能带管道、环境变量、npm run），
@@ -206,17 +210,24 @@ export function start(
   child.stdout?.on('data', pump('out'));
   child.stderr?.on('data', pump('err'));
 
-  child.on('exit', (code) => {
-    procs.delete(p.id);
+  // 收尾只做一次：spawn 失败（目录不存在、shell 起不来）时只来 error 不来 exit，
+  // 以前只在 exit 里清状态，于是界面一直显示「运行中」，再点启动还被拒绝
+  let ended = false;
+  const finish = (code: number | null) => {
+    if (ended) return;
+    ended = true;
+    if (procs.get(p.id) === child) procs.delete(p.id);
     st.running = false;
     st.pid = null;
     st.exitCode = code;
     onExit(p.id, code);
-  });
+  };
+  child.on('exit', (code) => finish(code));
   child.on('error', (e) => {
     const entry = { t: Date.now(), s: 'err' as const, line: `启动失败：${e.message}` };
     st.log.push(entry);
     onLog(p.id, entry);
+    finish(null);
   });
 
   return { ok: true };

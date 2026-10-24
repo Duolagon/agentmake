@@ -12,7 +12,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 const DB = path.join(ROOT, '.agentmake', 'e2e.db');
 
-const SUITES = ['breakpoint.e2e.mjs', 'mcp.e2e.mjs', 'replay.e2e.mjs', 'loop.e2e.mjs', 'proxy.e2e.mjs', 'spec.e2e.mjs', 'python.e2e.mjs', 'toolcall.e2e.mjs', 'scores.e2e.mjs', 'requests.e2e.mjs', 'dataflow.e2e.mjs', 'clients.e2e.mjs'];
+const SUITES = ['breakpoint.e2e.mjs', 'mcp.e2e.mjs', 'replay.e2e.mjs', 'loop.e2e.mjs', 'proxy.e2e.mjs', 'spec.e2e.mjs', 'python.e2e.mjs', 'toolcall.e2e.mjs', 'scores.e2e.mjs', 'requests.e2e.mjs', 'dataflow.e2e.mjs', 'clients.e2e.mjs', 'security.e2e.mjs'];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const children = [];

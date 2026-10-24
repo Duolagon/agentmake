@@ -5,6 +5,8 @@
 //   [2] 重放：模型一次都没被调用，用户拿到的（包括一段一段读的流）一字不差
 //   [3] node:http 上的断点：改写请求（content-length 跟着改）、伪造回答（根本不发请求）
 //   [4] Python：aiohttp（普通 / 读流 / 工具）+ 官方 openai SDK 的流式（以前完全看不见）—— 需要装了依赖的解释器
+//   [5] Python：urllib / requests 拿到的二进制响应和不带探针一模一样（以前按 UTF-8 解码再编码，字节被改坏）
+//   [6] fetch(new Request(url, {body}))：prompt 记得下来、断点改写生效
 
 import { spawn, spawnSync } from 'node:child_process';
 
@@ -124,6 +126,36 @@ if (!hasDeps) {
   await fetch(`${MOCK}/__reset`);
   const pb = await pyRun({ AGENTMAKE_REPLAY: pa.runId });
   ok((await count()).llm === 0 && pb.result === pp.result, '★ 重放：模型一次都没被调用，aiohttp 和 SDK 读到的流一字不差');
+}
+
+// ── 5 ──
+console.log('\n[5] Python：二进制响应原样透传（只用标准库，不需要额外依赖）');
+{
+  const py3 = process.env.AGENTMAKE_PY_DEPS || 'python3';
+  const bin = (probe) => run(py3, [here('py-binary-agent.py')], probe ? { PYTHONPATH: pyHarness } : {});
+  const plainBin = await bin(false);
+  const probedBin = await bin(true);
+  const got = JSON.parse(probedBin.result ?? '{}');
+  ok(got.urllib?.[0] === 512 && probedBin.result === plainBin.result,
+    `★ urllib（以及装了的话 requests）读到的字节和不带探针一模一样${probedBin.result !== plainBin.result ? `\n  无探针 ${plainBin.result}\n  有探针 ${probedBin.result}` : ''}`);
+}
+
+// ── 6 ──
+console.log('\n[6] fetch(Request)：请求体在 Request 对象上');
+{
+  const r6 = await node('request-obj-agent.mjs');
+  const c6 = (await callsOf(r6.runId)).find((c) => c.kind === 'llm');
+  ok(r6.out.includes('request-obj-done') && c6?.system === 'Request 对象里的系统提示',
+    `★ 记下来的 prompt 是 Request 里的那份（以前是空的）${r6.out.includes('request-obj-done') ? '' : `\n${r6.out.slice(-500)}`}`);
+
+  await armOnce();
+  const p6 = node('request-obj-agent.mjs');
+  const c6b = await pausedCall();
+  await resume(c6b, { action: 'patch', patch: { system: '断点里改过的（Request 形态）' } });
+  const r6b = await p6;
+  const last6 = await j(`${MOCK}/__last`);
+  ok(r6b.out.includes('request-obj-done') && last6.messages[0].content === '断点里改过的（Request 形态）',
+    '★ 断点改写在 Request 形态上也真的生效（以前会被原对象里的 body 盖回去或静默失败）');
 }
 
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

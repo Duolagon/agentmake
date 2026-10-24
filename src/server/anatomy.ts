@@ -103,7 +103,8 @@ export function anatomize(consumer: CallRow, runCalls: CallRow[], readFile: (f: 
   if (consumer.system) texts.push({ key: 'system', role: 'system', text: consumer.system });
   msgs.forEach((m, i) => texts.push({ key: `message:${i}`, role: m.role, text: m.content ?? '' }));
 
-  const files = [...new Set(parse<Frame[]>(consumer.frames, []).map((f) => f.file).reverse())];
+  // 带上行号：同文件有两处一样的模板时，analyze 靠调用位置选对那一处
+  const files = parse<Frame[]>(consumer.frames, []).map((f) => ({ file: f.file, line: f.line }));
   const totals: Record<SourceKind, number> = { template: 0, tool: 0, llm: 0, other: 0 };
   // 每个列表来源：哪几条在 prompt 里找到了
   const found = new Map<string, Set<number>>();

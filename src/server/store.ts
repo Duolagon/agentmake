@@ -297,6 +297,11 @@ export class Store {
     `);
   }
 
+  /** 这个源文件有没有出现在任何一次调用的调用栈里 —— 源码回写只许碰这些文件 */
+  seenInFrames(file: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM calls WHERE instr(frames, ?) > 0 LIMIT 1').get(JSON.stringify(file));
+  }
+
   /** 返回写入后的自增 id，供 SSE 的 Last-Event-ID 续传用 */
   ingest(ev: AgentEvent): number {
     const info = this.db

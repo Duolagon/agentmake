@@ -12,7 +12,7 @@
 
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { canParse, scanLiterals, type Literal } from './jsscan.ts';
+import { canParse, functionRanges, scanLiterals, type Literal } from './jsscan.ts';
 
 export type Writability = 'static_literal' | 'static_composed' | 'runtime_computed' | 'unparsable';
 
@@ -49,18 +49,21 @@ const NOTES: Record<Writability, string> = {
   unparsable: '源文件无法解析（可能是 TypeScript 或语法有误），暂不支持定位。',
 };
 
+/** 调用栈帧：文件 + 调用发生的行（行号用来在同文件多处相同文本时选对那一处） */
+export type SourceHint = string | { file: string; line?: number };
+
 /**
  * @param value  运行时捕获到的值（如实际发出的 system prompt）
- * @param files  候选源文件（取自这次调用的调用栈帧，内层优先）
+ * @param files  候选源文件（取自这次调用的调用栈帧，外层在前、内层在后）
  */
-export function analyze(value: string, files: string[]): WritabilityResult {
+export function analyze(value: string, files: SourceHint[]): WritabilityResult {
   if (!value) {
     return { writability: 'runtime_computed', file: null, line: null, segments: [], fileHash: null, note: NOTES.runtime_computed };
   }
 
   let sawUnparsable = false;
 
-  for (const file of dedupe(files)) {
+  for (const { file, lines } of dedupe(files)) {
     let src: string;
     try {
       src = readFileSync(file, 'utf8');
@@ -73,9 +76,13 @@ export function analyze(value: string, files: string[]): WritabilityResult {
     }
 
     const lits = scanLiterals(src);
+    const pickOne = (cands: Literal[][]) => choose(cands, lines, () => functionRanges(src));
 
     // 1) 完全相同的字面量 —— 最理想的情况
-    const exact = lits.find((l) => l.value === value);
+    const exacts = lits.filter((l) => l.value === value).map((l) => [l]);
+    const exactPick = exacts.length ? pickOne(exacts) : null;
+    if (exactPick === 'ambiguous') return ambiguous(file, exacts);
+    const exact = exactPick?.[0];
     if (exact) {
       return {
         writability: 'static_literal',
@@ -88,7 +95,9 @@ export function analyze(value: string, files: string[]): WritabilityResult {
     }
 
     // 2) 模板拼接：把同一模板的静态片段按序拼回去，看能否套进运行时值
-    const composed = matchTemplate(value, lits);
+    const templates = matchTemplate(value, lits);
+    const composed = templates.length ? pickOne(templates) : null;
+    if (composed === 'ambiguous') return ambiguous(file, templates);
     if (composed) {
       return {
         writability: 'static_composed',
@@ -109,7 +118,7 @@ export function analyze(value: string, files: string[]): WritabilityResult {
  * 模板匹配：quasis 必须按顺序出现在运行时值里，首片段贴着开头、尾片段贴着结尾。
  * 中间的空隙就是 ${} 插值填进去的内容。
  */
-function matchTemplate(value: string, lits: Literal[]): Literal[] | null {
+function matchTemplate(value: string, lits: Literal[]): Literal[][] {
   const groups = new Map<number, Literal[]>();
   for (const l of lits) {
     if (l.templateId === undefined) continue;
@@ -118,7 +127,7 @@ function matchTemplate(value: string, lits: Literal[]): Literal[] | null {
     else groups.set(l.templateId, [l]);
   }
 
-  let best: Literal[] | null = null;
+  let best: Literal[][] = [];
   let bestCover = 0;
 
   for (const parts of groups.values()) {
@@ -152,7 +161,9 @@ function matchTemplate(value: string, lits: Literal[]): Literal[] | null {
     const cover = texts.reduce((s, t) => s + t.length, 0);
     if (cover > bestCover) {
       bestCover = cover;
-      best = parts;
+      best = [parts];
+    } else if (cover === bestCover) {
+      best.push(parts); // 一模一样的模板写了两处 —— 交给 choose 按调用位置挑
     }
   }
   return best;
@@ -166,15 +177,50 @@ const seg = (l: Literal): Segment => ({
   text: l.value,
 });
 
-function dedupe(files: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
+/** 同一文件可能出现在多个帧里（文件内函数互调），每个帧的行号都留着，内层在前 */
+function dedupe(files: SourceHint[]): { file: string; lines: number[] }[] {
+  const byFile = new Map<string, number[]>();
   // 内层帧（最后一个）最可能是构造 prompt 的地方，优先查
-  for (const f of [...files].reverse()) {
-    if (!f || seen.has(f)) continue;
+  for (const h of [...files].reverse()) {
+    const f = typeof h === 'string' ? h : h?.file;
+    if (!f) continue;
     if (!/\.(mjs|cjs|js)$/.test(f)) continue; // TS 需要另一套解析，暂不支持
-    seen.add(f);
-    out.push(f);
+    const lines = byFile.get(f) ?? [];
+    if (typeof h !== 'string' && typeof h.line === 'number') lines.push(h.line);
+    byFile.set(f, lines);
   }
-  return out;
+  return [...byFile].map(([file, lines]) => ({ file, lines }));
+}
+
+/**
+ * 同一文件里有多个候选时，按调用位置挑：候选必须落在调用点所在的最内层函数里，且只有一个。
+ * 挑不出来就是 'ambiguous' —— 宁可不给一键回写，也不能改到无关函数里去。
+ */
+function choose(cands: Literal[][], lines: number[], ranges: () => { start: number; end: number }[]): Literal[] | 'ambiguous' {
+  if (cands.length === 1) return cands[0];
+  const rs = ranges();
+  for (const line of lines) {
+    const inner = rs
+      .filter((r) => r.start <= line && line <= r.end)
+      .sort((a, b) => (a.end - a.start) - (b.end - b.start))[0];
+    if (!inner) continue;
+    const inside = cands.filter((c) => c[0].line >= inner.start && c[0].line <= inner.end);
+    if (inside.length === 1) return inside[0];
+    if (inside.length > 1) return 'ambiguous';
+  }
+  return 'ambiguous';
+}
+
+function ambiguous(file: string, cands: Literal[][]): WritabilityResult {
+  const at = cands.map((c) => c[0].line).join('、');
+  return {
+    writability: 'runtime_computed',
+    file,
+    line: null,
+    segments: [],
+    fileHash: null,
+    note:
+      `源码里有 ${cands.length} 处一样的文本（${file} 第 ${at} 行），从调用位置判断不出这次用的是哪一处。` +
+      '为了不改到无关的函数，这里不提供一键回写 —— 请直接改源码里对应的那一处。',
+  };
 }

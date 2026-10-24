@@ -23,7 +23,7 @@ import { hookBefore, hookAfter } from './hook.ts';
 import * as projects from './projects.ts';
 import type { Spec } from './spec.ts';
 import { analyze } from './writability.ts';
-import { applyEdit, revert } from './patch.ts';
+import { applyEdit, applyEdits, backupOf, revert } from './patch.ts';
 import { Gate } from './gate.ts';
 import { langfuseTracer } from './langfuse.ts';
 import type { GatePhase } from './gate.ts';
@@ -239,9 +239,50 @@ async function readBody(req: http.IncomingMessage, limitBytes = 32 * 1024 * 1024
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/**
+ * 只服务本机。这个服务能改写源码、启动进程，必须挡住两类请求：
+ *   · Host 不是本机地址 —— DNS 重绑定：外站把自己的域名解析到 127.0.0.1，浏览器就把它当同源
+ *   · 带了外站 Origin 的写请求 —— 网页里一个 fetch(…, {method:'POST', mode:'no-cors'}) 就能打过来
+ * harness / MCP / curl 不带 Origin，不受影响。
+ */
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+function localOnly(req: http.IncomingMessage): string | null {
+  const host = String(req.headers.host ?? '').toLowerCase().replace(/:\d+$/, '');
+  if (host && !LOCAL_HOSTS.has(host)) return `拒绝：Host ${req.headers.host} 不是本机地址`;
+  const origin = req.headers.origin;
+  if (origin && req.method !== 'GET' && req.method !== 'HEAD') {
+    let o: URL | null = null;
+    try { o = new URL(origin); } catch { /* 畸形 Origin 一律当外站 */ }
+    if (!o || !LOCAL_HOSTS.has(o.hostname === '::1' ? '[::1]' : o.hostname) || Number(o.port || 80) !== PORT) {
+      return `拒绝：来自 ${origin} 的写请求`;
+    }
+  }
+  return null;
+}
+
+/**
+ * 回写 / 还原只允许碰「被调试程序的调用栈里出现过的源文件」—— 正常流程里，可回写性分析给出的
+ * 文件本来就来自调用栈，所以这条限制对正常用法透明，却能挡住拿这个接口去写任意文件。
+ */
+function writableSource(file: unknown): string | null {
+  if (typeof file !== 'string' || !path.isAbsolute(file)) return '文件路径必须是绝对路径';
+  if (!/\.(mjs|cjs|js)$/.test(file)) return '只能回写 .js / .mjs / .cjs 源文件';
+  if (!store.seenInFrames(path.resolve(file))) return '只能回写被调试程序调用栈里出现过的源文件';
+  return null;
+}
+
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
+  // URL 只取路径，基址写死：畸形 Host 让 new URL 抛错时，这里在 try 之外，会把整个服务带崩
+  let url: URL;
+  try {
+    url = new URL(req.url ?? '/', 'http://127.0.0.1');
+  } catch {
+    return json(res, { error: 'bad request' }, 400);
+  }
   const route = url.pathname;
+
+  const denied = localOnly(req);
+  if (denied) return json(res, { error: denied }, 403);
 
   try {
     // ── LLM 代理层：任何语言的 agent 只改 base URL 就能接进来 ──
@@ -357,9 +398,14 @@ const server = http.createServer(async (req, res) => {
 
       // 断线续传：补发 Last-Event-ID 之后遗漏的事件，再接实时流
       const last = Number(req.headers['last-event-id'] ?? url.searchParams.get('lastEventId') ?? 0);
+      // 分页补到最新为止 —— 只补一页的话，断线期间超过一页的事件就永远丢了。
+      // 整段是同步的，补完之前不会插进实时事件，接上实时流时不重不漏。
       if (Number.isFinite(last) && last > 0) {
-        for (const row of store.eventsSince(last)) {
-          res.write(`id: ${row.id}\ndata: ${row.json}\n\n`);
+        for (let from = last; ;) {
+          const page = store.eventsSince(from);
+          for (const row of page) res.write(`id: ${row.id}\ndata: ${row.json}\n\n`);
+          if (page.length < 1000) break;
+          from = page[page.length - 1].id;
         }
       }
 
@@ -573,24 +619,29 @@ const server = http.createServer(async (req, res) => {
           value = '';
         }
       }
-      let frames: { file: string }[] = [];
+      let frames: { file: string; line?: number }[] = [];
       try {
         frames = JSON.parse(c.frames || '[]');
       } catch {
         /* ignore */
       }
-      return json(res, { field, ...analyze(value, frames.map((f) => f.file)) });
+      return json(res, { field, ...analyze(value, frames.map((f) => ({ file: f.file, line: f.line }))) });
     }
 
     if (route === '/api/source/apply' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req));
-      const result = applyEdit(body);
+      const bad = writableSource(body.file);
+      if (bad) return json(res, { ok: false, error: bad }, 403);
+      // 多段（模板的几个静态片段）走原子批量：要么全写要么不动，撤销用同一份备份
+      const result = Array.isArray(body.edits) ? applyEdits(body) : applyEdit(body);
       if (result.ok) broadcastRaw({ type: 'source.changed', files: [body.file], by: 'platform' });
       return json(res, result);
     }
 
     if (route === '/api/source/revert' && req.method === 'POST') {
       const { file, backup } = JSON.parse(await readBody(req));
+      const bad = writableSource(file) ?? backupOf(file, backup);
+      if (bad) return json(res, { ok: false, error: bad }, 403);
       const result = revert(file, backup);
       if (result.ok) broadcastRaw({ type: 'source.changed', files: [file], by: 'platform' });
       return json(res, result);

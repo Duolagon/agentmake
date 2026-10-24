@@ -208,10 +208,13 @@ function renderSteps() {
       else if (f === 'parentId') s[f] = el.value || null;
       else s[f] = el.value;
       markDirty();
-      if (f === 'kind' || f === 'label') render();
+      if (f === 'kind') render();
     };
     if (el.tagName === 'SELECT' || el.type === 'checkbox' || el.type === 'number') el.onchange = handler;
     else el.oninput = handler;
+    // 名字会出现在别的步骤的「在谁之后」下拉里，要重画 —— 但不能每敲一个字就重画：
+    // 重画会换掉这个输入框，焦点丢了，敲第二个字就没地方去了。等输完（失焦 / 回车）再画
+    if (f === 'label') el.onchange = () => render();
   }
   for (const b of host.querySelectorAll('[data-del]')) {
     b.onclick = () => {

@@ -118,3 +118,27 @@ export function canParse(src: string): boolean {
     }
   }
 }
+
+/**
+ * 每个函数占的行区间（含箭头函数、方法）。用来判断「这次调用发生在哪个函数里」——
+ * 同一文件里有两处一样的 prompt 时，靠它选出调用点所在函数里的那一处。
+ */
+export function functionRanges(src: string): { start: number; end: number }[] {
+  let ast: any;
+  try {
+    ast = parse(src, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true, allowReturnOutsideFunction: true, locations: true });
+  } catch {
+    try {
+      ast = parse(src, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true, locations: true });
+    } catch {
+      return [];
+    }
+  }
+  const out: { start: number; end: number }[] = [];
+  walk.full(ast, (node: any) => {
+    if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') {
+      out.push({ start: node.loc.start.line, end: node.loc.end.line });
+    }
+  });
+  return out;
+}

@@ -866,25 +866,23 @@ async function checkWritability(callId, field) {
   host.querySelector('.wbApply').onclick = async () => {
     const msg = host.querySelector('.wbMsg');
     const areas = [...host.querySelectorAll('textarea[data-seg]')];
-    // 从后往前写：前面的改动会让后面的字节坐标偏移
     const edits = areas
       .map((a, i) => ({ seg: r.segments[i], text: a.value }))
-      .filter((e) => e.text !== e.seg.text)
-      .sort((a, b) => b.seg.start - a.seg.start);
+      .filter((e) => e.text !== e.seg.text);
 
     if (!edits.length) { msg.textContent = '没有改动'; return; }
 
-    let hash = r.fileHash;
-    for (const e of edits) {
-      const res = await fetch('/api/source/apply', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ file: r.file, start: e.seg.start, end: e.seg.end, newText: e.text, fileHash: hash }),
-      }).then((x) => x.json());
-      if (!res.ok) { msg.innerHTML = `<span class="bad">${esc(res.error)}</span>`; return; }
-      hash = undefined; // 后续片段的哈希已变，跳过冲突检测（同一批次里我们自己改的）
-      msg.innerHTML = `已写入 · <a href="#" class="link undo" data-b="${esc(res.backup)}">撤销</a>` +
-        ` · <span class="warn">被调试进程仍在跑旧代码，需重启</span>`;
-    }
+    // 几段一次交给服务端：要么全写进去要么都不动，备份也只有一份 —— 撤销才能回到原样
+    const res = await fetch('/api/source/apply', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        file: r.file, fileHash: r.fileHash,
+        edits: edits.map((e) => ({ start: e.seg.start, end: e.seg.end, newText: e.text })),
+      }),
+    }).then((x) => x.json());
+    if (!res.ok) { msg.innerHTML = `<span class="bad">${esc(res.error)}</span>`; return; }
+    msg.innerHTML = `已写入 ${edits.length} 段 · <a href="#" class="link undo" data-b="${esc(res.backup)}">撤销</a>` +
+      ` · <span class="warn">被调试进程仍在跑旧代码，需重启</span>`;
     msg.querySelector('.undo')?.addEventListener('click', async (ev) => {
       ev.preventDefault();
       const res = await fetch('/api/source/revert', {

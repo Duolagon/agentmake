@@ -241,6 +241,12 @@ http
       return res.end(JSON.stringify(kept.map((content, i) => ({ id: i + 1, role: i % 3 === 2 ? 'agent' : 'customer', content }))));
     }
 
+    // 二进制下载：256 个字节全有，不是合法 UTF-8 —— 探针不能把它按文本重建
+    if (req.method === 'GET' && p.startsWith('/bin/')) {
+      res.setHeader('content-type', 'application/octet-stream');
+      return res.end(Buffer.from(Array.from({ length: 512 }, (_, i) => i % 256)));
+    }
+
     // 非 LLM 的 GET 当成「工具/抓数据」成功返回 —— 固定件里的 /feed/N 走这里。
     // 早期一律 404，导致流程图上工具步骤永远是红的，看不出真实形态。
     if (req.method === 'GET') return res.end(`fixture payload for ${p}`);

@@ -103,15 +103,20 @@ export function startRegression(
   deps: RegressDeps,
   opts: { baseline: string; target?: string; only?: 'failed' | 'all'; limit?: number; timeoutMs?: number },
 ): RegressBatch | { error: string } {
+  // 基线可以是一次运行、一个进程，也可以是一个运行组 —— 组不是一行 runs，getRun 查不到，
+  // 但 requestRuns 按 SCOPE（含 group_id）能把组里的请求都捞出来
   const base = deps.getRun(opts.baseline);
-  if (!base) return { error: `没有这个运行：${opts.baseline}` };
+  const all = deps.requestRuns(opts.baseline);
+  if (!base && !all.length) return { error: `没有这个运行或运行组：${opts.baseline}` };
 
-  const runs = deps.requestRuns(opts.baseline).filter((r) => r.request_url && !r.request_truncated);
+  const runs = all.filter((r) => r.request_url && !r.request_truncated);
   if (!runs.length) {
     return { error: `${opts.baseline} 下面没有记下入站请求的运行 —— 批量回归只支持 Node 常驻服务（需要 harness 旁听到请求本身）` };
   }
 
-  const target = opts.target ? deps.getRun(opts.target) : deps.findTarget(opts.baseline);
+  // 找目标进程要一个锚点：组没有自己的进程，用组里最后一个请求所在的进程
+  const anchor = base ? opts.baseline : runs[runs.length - 1].run_id;
+  const target = opts.target ? deps.getRun(opts.target) : deps.findTarget(anchor);
   if (!target) return { error: '找不到改好之后在跑的服务。先用改好的代码把服务重新起来（带上探针），或者指定 target' };
   const port = (JSON.parse(target.listen ?? '[]') as { port: number }[])[0]?.port;
   if (!port) return { error: `运行 ${target.run_id} 没有在监听端口，没法往它重发请求` };

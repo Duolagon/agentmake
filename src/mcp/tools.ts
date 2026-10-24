@@ -177,7 +177,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'get_call',
     description:
-      '★ 最高价值的工具。返回一次调用的完整内容：**实际发出去的 system prompt、messages、tools、参数**，' +
+      '★ 最高价值的工具。返回一次调用的完整内容：**实际发出去的 system prompt、messages、tools、参数**（工具 / HTTP 调用则是响应体），' +
       '以及模型的实际响应（含它发起的工具调用与参数）、每条消息里回给模型的工具结果、token 用量、发起它的调用路径。' +
       '这是读代码推不出来的东西 —— f-string 拼接、列表截断、变量展开之后的最终形态。' +
       '改 prompt 前先看这个，不要靠猜。',
@@ -210,7 +210,15 @@ export const TOOLS: Tool[] = [
 
       if (c.error) out.push(`\n【错误】\n${clip(c.error, maxChars)}`);
 
-      if (c.kind !== 'http') {
+      if (c.kind === 'http') {
+        // 工具调用的响应体就是喂给下游 prompt 的原料 —— 追「数据在哪一步丢的」最需要它
+        if (c.response_body != null) {
+          const size = c.response_bytes ?? String(c.response_body).length;
+          out.push(`\n【响应体】(${size} 字节${c.body_truncated ? '，只存了前面一部分' : ''})\n${clip(c.response_body, maxChars)}`);
+        } else {
+          out.push('\n【响应体】没有记录（非文本响应，或运行时关了响应体采集）');
+        }
+      } else {
         if (c.system) out.push(`\n【SYSTEM PROMPT】(${String(c.system).length} 字符)\n${clip(c.system, maxChars)}`);
         const msgs = parse(c.messages, []) as any[];
         for (const [i, m] of msgs.entries()) {
@@ -343,7 +351,9 @@ export const TOOLS: Tool[] = [
     },
     async run({ replayFrom, language, group }) {
       const h = await api('/api/health');
-      const replay = (replayFrom ? `AGENTMAKE_REPLAY=${replayFrom} ` : '') + (group ? `AGENTMAKE_GROUP=${group} ` : '');
+      // 调试器不在默认地址时，探针也得知道去哪儿报 —— 不带的话它连 8787，记录全丢
+      const target = BASE !== 'http://127.0.0.1:8787' ? `AGENTMAKE_URL=${BASE} ` : '';
+      const replay = target + (replayFrom ? `AGENTMAKE_REPLAY=${replayFrom} ` : '') + (group ? `AGENTMAKE_GROUP=${group} ` : '');
       const lang = (language ?? '').toLowerCase();
 
       const node = `  ${replay}NODE_OPTIONS="--import ${h.harnessPath}" node your-app.mjs`;

@@ -49,7 +49,23 @@ function encode(text: string, quote: "'" | '"' | '`'): string {
     .replace(/\n/g, '\\n'); // 普通字符串不能跨行，换行必须转义
 }
 
+/** 同一文件里的多段改动（一个模板的几个静态片段）—— 必须一次写完：要么全写进去，要么一个字节都不动 */
+export type BatchEditRequest = {
+  file: string;
+  fileHash?: string;
+  edits: { start: number; end: number; newText: string }[];
+};
+
 export function applyEdit(req: EditRequest): EditResult {
+  return applyEdits({ file: req.file, fileHash: req.fileHash, edits: [{ start: req.start, end: req.end, newText: req.newText }] });
+}
+
+/**
+ * 多段改动原子落盘：冲突检测、语法校验、逐段回读都在内存里对**全部改动**做完，
+ * 全部通过才备份一次、写一次。于是撤销（用这一份备份）一定能回到改动前的原样，
+ * 中途哪一段不合格也不会留下写了一半的文件。
+ */
+export function applyEdits(req: BatchEditRequest): EditResult {
   let src: string;
   try {
     src = readFileSync(req.file, 'utf8');
@@ -65,43 +81,56 @@ export function applyEdit(req: EditRequest): EditResult {
     };
   }
 
-  if (req.start < 0 || req.end > src.length || req.start > req.end) {
-    return { ok: false, error: '替换区间越界 —— 分析结果可能已过期' };
+  const edits = Array.isArray(req.edits) ? req.edits : [];
+  if (!edits.length) return { ok: false, error: '没有要写入的改动' };
+
+  const lits = scanLiterals(src);
+  type Plan = { head: number; tail: number; payload: string; contentAt: number; newText: string; before: string };
+  const plans: Plan[] = [];
+  for (const e of edits) {
+    if (typeof e.start !== 'number' || typeof e.end !== 'number' || typeof e.newText !== 'string') {
+      return { ok: false, error: '改动参数不完整' };
+    }
+    if (e.start < 0 || e.end > src.length || e.start > e.end) {
+      return { ok: false, error: '替换区间越界 —— 分析结果可能已过期' };
+    }
+    // 定位这个区间对应的字面量，拿到它的引号风格
+    const lit = lits.find((l) => l.start === e.start && l.end === e.end);
+    if (!lit) {
+      return { ok: false, error: '该位置已不是一个字符串字面量 —— 源码已变化，请重新分析' };
+    }
+    // 普通字符串塞不下换行；真要多行就把整个字面量升级成模板，连引号一起换
+    const upgrade = lit.quote !== '`' && /\n/.test(e.newText);
+    plans.push(upgrade
+      ? { head: e.start - 1, tail: e.end + 1, payload: '`' + encode(e.newText, '`') + '`', contentAt: 1, newText: e.newText, before: src.slice(e.start, e.end) }
+      : { head: e.start, tail: e.end, payload: encode(e.newText, lit.quote), contentAt: 0, newText: e.newText, before: src.slice(e.start, e.end) });
   }
 
-  // 定位这个区间对应的字面量，拿到它的引号风格
-  const lit = scanLiterals(src).find((l) => l.start === req.start && l.end === req.end);
-  if (!lit) {
-    return { ok: false, error: '该位置已不是一个字符串字面量 —— 源码已变化，请重新分析' };
+  plans.sort((a, b) => a.head - b.head);
+  for (let i = 1; i < plans.length; i++) {
+    if (plans[i].head < plans[i - 1].tail) return { ok: false, error: '改动区间互相重叠' };
   }
 
-  const before = src.slice(req.start, req.end);
-  let quote = lit.quote;
-  let head = req.start;
-  let tail = req.end;
-  let payload = encode(req.newText, quote);
-
-  // 普通字符串塞不下换行；真要多行就把整个字面量升级成模板，连引号一起换
-  if (quote !== '`' && /\n/.test(req.newText)) {
-    head = req.start - 1;
-    tail = req.end + 1;
-    quote = '`';
-    payload = '`' + encode(req.newText, '`') + '`';
-  }
-
-  const next = src.slice(0, head) + payload + src.slice(tail);
+  // 从后往前拼，前面的偏移不受影响
+  let next = src;
+  for (const p of [...plans].reverse()) next = next.slice(0, p.head) + p.payload + next.slice(p.tail);
 
   // ② 写后校验：用真解析器确认没把代码改坏
   if (!canParse(next)) {
     return { ok: false, error: '改动会导致源文件语法错误，已放弃（文件未被修改）' };
   }
-  // 再确认新值确实落在了预期位置
-  const check = scanLiterals(next).find((l) => l.start === head + (quote === '`' && head !== req.start ? 1 : 0));
-  if (check && check.value !== req.newText) {
-    return { ok: false, error: '写回后的内容与预期不符，已放弃（文件未被修改）' };
+  // 再逐段确认新值确实落在了预期位置（新位置 = 原位置 + 它前面各段的长度变化）
+  const after = scanLiterals(next);
+  let shift = 0;
+  for (const p of plans) {
+    const at = p.head + shift + p.contentAt;
+    if (!after.some((l) => l.start === at && l.value === p.newText)) {
+      return { ok: false, error: '写回后的内容与预期不符，已放弃（文件未被修改）' };
+    }
+    shift += p.payload.length - (p.tail - p.head);
   }
 
-  // ③ 备份后落盘
+  // ③ 备份后落盘 —— 只备份一次，是改动前的原样
   let backup: string | undefined;
   try {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -119,7 +148,21 @@ export function applyEdit(req: EditRequest): EditResult {
     return { ok: false, error: `写入失败：${e instanceof Error ? e.message : e}` };
   }
 
-  return { ok: true, backup, before, after: req.newText };
+  return {
+    ok: true,
+    backup,
+    before: plans.map((p) => p.before).join(' … '),
+    after: plans.map((p) => p.newText).join(' … '),
+  };
+}
+
+/** 备份必须是我们自己做的那份：在备份目录里、且是同名文件。不是就返回拒绝原因 */
+export function backupOf(file: string, backup: unknown): string | null {
+  if (typeof backup !== 'string') return '缺少备份路径';
+  const b = path.resolve(backup);
+  if (!b.startsWith(BACKUP_ROOT + path.sep)) return '备份不在 .agentmake/backups 里';
+  if (path.basename(b) !== path.basename(file)) return '备份和要还原的文件对不上';
+  return null;
 }
 
 /** 从备份还原 —— 撤销按钮的实现 */

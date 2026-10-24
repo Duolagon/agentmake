@@ -7,7 +7,7 @@
 
 import { TOOLS } from './tools.ts';
 
-type Req = { jsonrpc: '2.0'; id?: string | number; method: string; params?: any };
+type Req = { jsonrpc: '2.0'; id?: string | number | null; method: string; params?: any };
 
 const log = (...a: unknown[]) => {
   if (process.env.AGENTMAKE_DEBUG) console.error('[agentmake-mcp]', ...a);
@@ -85,6 +85,12 @@ process.stdin.on('data', (chunk) => {
       req = JSON.parse(line);
     } catch {
       log('丢弃非 JSON 行:', line.slice(0, 80));
+      continue;
+    }
+    // 合法 JSON 不一定是对象：null / 数字 / 数组（批量请求，没实现）都要按协议回错，不能把进程带崩
+    if (!req || typeof req !== 'object' || Array.isArray(req) || typeof (req as Req).method !== 'string') {
+      log('丢弃不是 JSON-RPC 请求的行:', line.slice(0, 80));
+      fail(null, -32600, 'Invalid Request');
       continue;
     }
     handle(req).catch((e) => {

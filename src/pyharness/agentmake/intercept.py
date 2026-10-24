@@ -154,7 +154,8 @@ def run_call(
     global _http_count
     _http_count += 1
     if _http_count > MAX_HTTP_CALLS:
-        return build_response(*_passthrough(do_send, url, body))
+        # 超了上限只透传：交回原生响应，不经 build_response —— 后者按文本重建，二进制会被改坏
+        return do_send(url, body)[3]
 
     call_id, d = _decide_before(url, method, body, headers)
     action = d.get("action")
@@ -189,11 +190,6 @@ def run_call(
         r = after.get("response") or {}
         return build_response(int(r.get("status", status)), r.get("body") or "", native)
     return native
-
-
-def _passthrough(do_send, url, body):
-    status, ok, text, native = do_send(url, body)
-    return status, text or "", native
 
 
 # ── httpx ──────────────────────────────────────────────────
@@ -819,9 +815,10 @@ def _patch_urllib() -> None:
                 rebuilt = ue.HTTPError(e.url, e.code, e.reason, e.headers, io.BytesIO(raw))
                 return e.code, False, text, rebuilt
             raw = resp.read()
-            text = raw.decode("utf-8", "replace")
+            text = raw.decode("utf-8", "replace")  # 只给观测用；交回用户的是原始字节
             status = getattr(resp, "status", 200) or 200
-            return status, 200 <= status < 400, text, _wrap(status, text, resp.headers, resp.url)
+            native = uresp.addinfourl(io.BytesIO(raw), resp.headers, resp.url, status)
+            return status, 200 <= status < 400, text, native
 
         def build(status, text, native):
             hdrs = getattr(native, "headers", None)

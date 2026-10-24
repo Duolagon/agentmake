@@ -64,13 +64,26 @@ export function verifyRuns(
   a: { id: string; flow: Flow; anomalies: Anomaly[] },
   b: { id: string; flow: Flow; anomalies: Anomaly[] },
 ): Verification {
-  const key = (s: FlowStep) => `${s.kind}:${s.label}`;
-  const aSteps = new Map(a.flow.steps.map((s) => [key(s), s]));
-  const bSteps = new Map(b.flow.steps.map((s) => [key(s), s]));
+  // 步骤身份 = 类型 + 名字 + 所在文件（不带行号：改代码行号会漂）。
+  // 只用名字的话，两个文件里各有一个 analyze() 会撞成一个键，后一个盖掉前一个，
+  // 真实的变化就被显示成「没变」。同一文件里同名的再按出现次序编号。
+  const keyed = (steps: FlowStep[]) => {
+    const seen = new Map<string, number>();
+    return [...steps].sort((x, y) => x.order - y.order).map((s) => {
+      const base = `${s.kind}:${s.label}@${s.file}`;
+      const n = seen.get(base) ?? 0;
+      seen.set(base, n + 1);
+      return [n ? `${base}#${n}` : base, s] as const;
+    });
+  };
+  const aKeyed = keyed(a.flow.steps);
+  const bKeyed = keyed(b.flow.steps);
+  const aSteps = new Map(aKeyed);
+  const bSteps = new Map(bKeyed);
 
   // 顺序：按 B 的执行顺序；只在 A 里有的步骤插在它在 A 里的前一步后面
-  const order = [...b.flow.steps].sort((x, y) => x.order - y.order).map(key);
-  const aOrder = [...a.flow.steps].sort((x, y) => x.order - y.order).map(key);
+  const order = bKeyed.map(([k]) => k);
+  const aOrder = aKeyed.map(([k]) => k);
   aOrder.forEach((k, i) => {
     if (order.includes(k)) return;
     const prev = aOrder.slice(0, i).reverse().find((p) => order.includes(p));

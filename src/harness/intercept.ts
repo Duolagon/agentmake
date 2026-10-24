@@ -215,6 +215,27 @@ type Plan = {
   replayed?: boolean;
 };
 
+/** 读出请求体文本，不消耗调用方的那一份。读不了（流式 body）就返回 null */
+async function bodyText(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<string | null> {
+  const b = init?.body;
+  if (typeof b === 'string') return b;
+  if (b instanceof URLSearchParams) return b.toString();
+  if (b instanceof ArrayBuffer || ArrayBuffer.isView(b)) {
+    const v = b instanceof ArrayBuffer ? new Uint8Array(b) : new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    return new TextDecoder().decode(v);
+  }
+  if (b instanceof Blob) return b.text();
+  if (b != null) return null;
+  if (input instanceof Request && input.body && !input.bodyUsed) {
+    try {
+      return await input.clone().text();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 async function prepare(
   input: Parameters<typeof fetch>[0],
   init?: Parameters<typeof fetch>[1],
@@ -266,12 +287,13 @@ async function prepare(
   const frames = captureFrames(SELF_DIR);
   const callId = `call_${runId.slice(4)}_${callNo++}`;
 
-  // 只有 string 形式的 body 能安全读取而不消耗流；其余形态先跳过解析
+  // 请求体可能在 init.body 里，也可能在 Request 对象自己身上（fetch(new Request(url, {body}))）。
+  // 后者读 clone，不消耗用户的那一份；只有流式 body（ReadableStream）读不了，跳过解析。
   let parsed: unknown = null;
-  const body = init?.body;
-  if (typeof body === 'string') {
+  const text = await bodyText(input, init);
+  if (text != null) {
     try {
-      parsed = JSON.parse(body);
+      parsed = JSON.parse(text);
     } catch {
       parsed = null;
     }
@@ -318,9 +340,22 @@ async function prepare(
     const { body: newBody, url: newUrl } = denormalize(cls.kind, request, decision.patch, url);
     const target = newUrl ?? url;
     const merged = { ...(init ?? {}), body: JSON.stringify(newBody) };
-    // input 是 Request 对象时不能只换 init，得重建，否则原对象里的 body 会盖回来
-    nextInput = input instanceof Request ? new Request(target, merged as never) : target;
-    nextInit = input instanceof Request ? undefined : merged;
+    if (input instanceof Request) {
+      // input 是 Request 对象时不能只换 init，得重建，否则原对象里的 body 会盖回来。
+      // 方法、头、signal 从原 Request 继承（init 里给了的优先），长度头让 fetch 自己重算
+      const h = new Headers((init?.headers as HeadersInit | undefined) ?? input.headers);
+      h.delete('content-length');
+      nextInput = new Request(target, {
+        method: init?.method ?? input.method,
+        headers: h,
+        signal: init?.signal ?? input.signal,
+        body: merged.body,
+      });
+      nextInit = undefined;
+    } else {
+      nextInput = target;
+      nextInit = merged;
+    }
     // 指纹要按**实际发出去的**请求算：改过 prompt 就该穿透缓存去真调
     finalRequest = normalizeRequest(classify(target, method, headers as never), newBody);
     // 同时把改写后的请求补报一次，否则库里留的是改之前的版本
