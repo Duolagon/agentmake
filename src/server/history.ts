@@ -124,6 +124,13 @@ export function programName(r: { argv: string | null; cwd: string | null; run_id
  */
 const INJECTED = /(Current runtime context|<system-reminder>|<environment_details>|<env>|<context>|<user-context>)/;
 
+/** 把用户消息拆成「人写的那句」和「框架拼在后面的运行时上下文」 */
+export function splitInjected(text: string): { main: string; context: string | null } {
+  const m = INJECTED.exec(text);
+  if (!m || m.index === 0) return { main: text, context: null };
+  return { main: text.slice(0, m.index).trimEnd(), context: text.slice(m.index) };
+}
+
 export function cleanTask(text: string | null | undefined, max = 140): string | null {
   if (!text) return null;
   let t = String(text);

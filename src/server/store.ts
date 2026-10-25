@@ -11,6 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { HistoryRun, RunStats } from './history.ts';
+import type { TranscriptCall } from './transcript.ts';
 import type { AgentEvent, HttpBody, HttpCall, LLMAfter, LLMBefore, LLMPatched, RunStarted } from '../shared/types.ts';
 import { checkCall, type RuleInput } from './rules.ts';
 
@@ -914,6 +915,16 @@ export class Store {
     const rid = runId ?? this.latestRunId();
     if (!rid) return [];
     return this.db.prepare(`SELECT ${cols} FROM calls WHERE run_id IN ${SCOPE} ORDER BY seq`).all(...scope(rid));
+  }
+
+  /** 完整记录（transcript.ts）的原料：这个范围里的全部调用，按发出的先后。工具响应体只带开头一段做预览 */
+  transcriptCalls(runId: string): TranscriptCall[] {
+    return this.db
+      .prepare(`SELECT call_id, run_id, kind, model, url, method, status, ok, ${ERROR_COL}, system, messages,
+                       response_text, response_tool_calls, finish_reason, duration_ms, input_tokens, output_tokens,
+                       cache_read_tokens, started_at, substr(response_body, 1, 400) AS response_preview, response_bytes
+                FROM calls WHERE run_id IN ${SCOPE} ORDER BY started_at, seq`)
+      .all(...scope(runId)) as TranscriptCall[];
   }
 
   /** 一次运行（不含子运行）按顺序的全部调用 —— 拆 prompt 来源时，上游只在同一次运行里找 */

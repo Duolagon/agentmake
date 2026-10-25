@@ -13,6 +13,7 @@ import { initVerify, loadVerify, noteRegress, progName } from './verify.js';
 import { initSpec, loadSpec, flowAnnotations } from './spec.js';
 import { initProjects, noteProcEvent } from './projects.js';
 import { initHistory, loadHistory, renderHistory, scheduleHistory } from './history.js';
+import { initTranscript, refreshTranscript, showTranscript } from './transcript.js';
 
 const $ = (id) => document.getElementById(id);
 const calls = new Map();
@@ -65,7 +66,10 @@ function applyEvent(ev) {
       // 被拉起的子进程也不跟（dsh 用 bash 跑的 npm test 之类）—— 除非拉起它的是个自己不调模型的
       // 包装进程（npm start → node agent.mjs），那真正要看的就是这个子进程
       const follow = spawner ? !hasOwnCalls(spawner) : !(parent && currentRun === parent);
-      if (follow && view !== 'verify') currentRun = ev.runId;
+      if (follow && view !== 'verify' && currentRun !== ev.runId) {
+        currentRun = ev.runId;
+        if (!selectedCall) showTranscript(currentRun); // 跟到新运行：右栏换成它的完整记录
+      }
       scheduleHistory();
       renderRunPicker();
       renderList();
@@ -87,7 +91,7 @@ function applyEvent(ev) {
         system_preview: (ev.request.system || '').slice(0, 160),
         started_at: ev.ts, pending: true,
       });
-      renderList(); scheduleGraph();
+      renderList(); scheduleGraph(); refreshTranscript(400);
       break;
 
     case 'llm.after': {
@@ -102,7 +106,7 @@ function applyEvent(ev) {
         faked: ev.faked ? 1 : 0,
         replayed: ev.replayed ? 1 : 0,
       });
-      renderList(); scheduleGraph(); scheduleHistory(2500);
+      renderList(); scheduleGraph(); scheduleHistory(2500); refreshTranscript();
       if (selectedCall === ev.callId) showDetail(ev.callId);
       break;
     }
@@ -171,7 +175,7 @@ function applyEvent(ev) {
         status: ev.status, ok: ev.ok ? 1 : 0, duration_ms: ev.durationMs,
         error: ev.error, started_at: ev.ts,
       });
-      renderList(); scheduleGraph();
+      renderList(); scheduleGraph(); refreshTranscript();
       break;
   }
 }
@@ -566,6 +570,11 @@ async function selectRun(runId) {
   clearAlert();
   renderRunPicker();
   renderHistory();
+  // 换了运行：右栏回到这次运行的完整记录（验证视图的右栏是改前改后对比，不动它）
+  if (view !== 'verify') {
+    selectedCall = null;
+    showTranscript(currentRun);
+  }
   await loadRunCalls(currentRun);
   await applyNodeFilter(null);
   renderList();
@@ -803,6 +812,8 @@ async function showDetail(callId) {
   }
   const c = await res.json();
   const parts = [];
+  // 从完整记录点进来的：一键回去，不用重新找这次运行
+  if (currentRun) parts.push('<button class="btn tr-back" id="trBack">← 回到完整记录</button>');
 
   parts.push(`<div class="block"><h3>概览</h3><div class="kv">
     <span>类型</span><b>${esc(c.kind === 'http' ? c.method + ' 请求' : c.provider)}</b>
@@ -876,8 +887,8 @@ async function showDetail(callId) {
       parts.push(block(`响应 <span class="count">${c.finish_reason ? 'finish: ' + esc(c.finish_reason) : ''}</span>`,
         (c.response_text ? `<pre>${esc(c.response_text)}</pre>` : '') + toolsHtml({ toolCalls: respCalls })));
     }
-    if (c.streaming) {
-      parts.push(block('注意', `<pre>流式响应，v0 暂未解析响应体（Phase 2 处理）</pre>`));
+    if (c.streaming && !c.response_text && !respCalls.length && c.duration_ms != null) {
+      parts.push(block('注意', `<pre>流式响应没有拼出正文 —— 原始响应里是收到的全部 SSE 事件</pre>`));
     }
   }
 
@@ -889,8 +900,18 @@ async function showDetail(callId) {
   }
 
   if (c.raw_request) parts.push(block('原始请求体', `<pre>${esc(pretty(c.raw_request))}</pre>`));
+  if (c.raw_response) {
+    const raw = typeof c.raw_response === 'string' ? c.raw_response : JSON.stringify(c.raw_response);
+    parts.push(block(`原始响应体 <span class="count">${raw.length >= 1024 ? (raw.length / 1024).toFixed(1) + 'KB' : raw.length + 'B'}</span>`,
+      `<pre>${esc(prettyRaw(raw).slice(0, 200000))}</pre>`));
+  }
 
   pane.innerHTML = parts.join('');
+  $('trBack')?.addEventListener('click', () => {
+    selectedCall = null;
+    renderList();
+    showTranscript(currentRun);
+  });
   for (const b of pane.querySelectorAll('.wb')) {
     b.onclick = () => checkWritability(b.dataset.call, b.dataset.field);
   }
@@ -969,6 +990,16 @@ async function checkWritability(callId, field) {
 }
 
 const block = (title, html) => `<div class="block"><h3>${title}</h3>${html}</div>`;
+
+/** 原始响应：JSON 就排版；流式的存的是一个 JSON 字符串（SSE 原文），解开一层显示原文 */
+function prettyRaw(raw) {
+  try {
+    const v = JSON.parse(raw);
+    return typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+  } catch {
+    return raw;
+  }
+}
 
 // ── prompt 按来源拆开 ──────────────────────────────────────
 
@@ -1104,6 +1135,8 @@ async function boot() {
   renderHistory();
   initRailToggle();
   renderRunPicker();
+  initTranscript({ openCall: showDetail, current: () => currentRun });
+  showTranscript(currentRun); // 右栏默认就是完整记录，不再空着等人点
   await loadRunCalls(currentRun);
   renderList();
   await loadGraph();
