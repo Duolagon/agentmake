@@ -211,3 +211,34 @@ test('异常：一切正常时什么都不报', () => {
   const cs = [...ticket('r1', 6), ...ticket('r2', 6)];
   assert.deepEqual(computeAnomalies({ flow: buildFlow(cs, []), calls: cs }), []);
 });
+
+test('工具 → 模型的 0% 照报：抓回来的东西完全没用上，正是要抓的 bug', () => {
+  const tool = { kind: 'http', response_body: '这是一段很长的检索结果，里面有很多关键事实。第二句话也很重要，不能丢。第三句话收尾。' };
+  const m = measure([tool], llmWith(['完全无关的提问内容，和检索结果没有一点关系']));
+  assert.equal(m.coverage, 0);
+  assert.equal(isDropped(m), true);
+});
+
+// ── 旁路调用与并发：时间上挨着不等于有数据关系 ──
+
+const PLAN = '第一步先列出工作区目录结构。第二步阅读 README 了解启动方式。第三步运行单元测试并收集失败用例。第四步汇总成测试报告。';
+
+test('★ dsh 的形状：主 agent 和起标题并发、下一轮主 agent 接着自己上一轮 —— 不报「数据被丢」', () => {
+  const agentOut = '我先看一下工作区的目录结构和文件清单。然后阅读 README 了解这个服务怎么启动。再设计测试用例逐项验证每一个接口。';
+  const cs = [
+    call('d', 'llm', [['turn', 10], ['agent', 20]], { started_at: 1000, duration_ms: 3800, system: '你是 agent', messages: JSON.stringify([{ role: 'user', content: '测试这个服务' }]), response_text: agentOut }),
+    call('d', 'llm', [['turn', 11], ['title', 30]], { started_at: 1000, duration_ms: 2000, system: '起一个标题', messages: JSON.stringify([{ role: 'user', content: '测试这个服务' }]), response_text: '这是一次针对服务的完整测试会话。重点检查接口行为与已知缺陷。' }),
+    call('d', 'llm', [['turn', 10], ['agent', 20]], { started_at: 5000, duration_ms: 3000, system: '你是 agent', messages: JSON.stringify([{ role: 'user', content: '测试这个服务' }, { role: 'assistant', content: agentOut }, { role: 'user', content: '工具结果：README 内容……' }]), response_text: '好的' }),
+  ];
+  const anomalies = computeAnomalies({ flow: buildFlow(cs, []), calls: cs });
+  assert.deepEqual(anomalies.filter((a) => a.kind === 'data_dropped'), []);
+});
+
+test('★ 模型的输出整段没传下去（规划的结果没进执行的 prompt）照报', () => {
+  const cs = [
+    call('p', 'llm', [['run', 10], ['plan', 20]], { started_at: 1000, duration_ms: 500, system: '你是规划者', messages: JSON.stringify([{ role: 'user', content: '测试这个服务' }]), response_text: PLAN }),
+    call('p', 'llm', [['run', 11], ['execute', 30]], { started_at: 2000, duration_ms: 500, system: '你是执行者', messages: JSON.stringify([{ role: 'user', content: '测试这个服务' }]), response_text: '完成' }),
+  ];
+  const anomalies = computeAnomalies({ flow: buildFlow(cs, []), calls: cs });
+  assert.equal(anomalies.filter((a) => a.kind === 'data_dropped').length, 1);
+});

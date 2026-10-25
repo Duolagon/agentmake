@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { Store } from '../src/server/store.ts';
+import { stripNodeOptions, stripPythonPath } from '../src/harness/children.ts';
 
 function tmp() {
   const dir = mkdtempSync(path.join(tmpdir(), 'am-runs-'));
@@ -174,6 +175,43 @@ test('迁移：老库的 runs 表没有新列，打开后补上并给老运行�
     assert.equal(r.kind, 'process');
     server(s, 'p1', ['a']);
     assert.equal((s.listCalls('p1') as unknown[]).length, 1);
+  } finally {
+    t.cleanup();
+  }
+});
+
+// ── 子进程继承探针：开关 AGENTMAKE_CHILDREN=0 时把自己从环境变量里摘干净 ──
+
+test('摘掉 NODE_OPTIONS 里我们的 --import，别的选项原样留着（空格 / 等号 / 引号 / file:// 都认）', () => {
+  const reg = '/x/agentmake/src/harness/register.ts';
+  assert.equal(stripNodeOptions(`--max-old-space-size=4096 --import ${reg}`, reg), '--max-old-space-size=4096');
+  assert.equal(stripNodeOptions(`--import=${reg} --trace-warnings`, reg), '--trace-warnings');
+  assert.equal(stripNodeOptions(`--import "${reg}"`, reg), '');
+  assert.equal(stripNodeOptions(`--import file://${reg} --import /other/hook.mjs`, reg), '--import /other/hook.mjs');
+});
+
+test('摘掉 PYTHONPATH 里的 Python 探针目录，用户自己的路径保留', () => {
+  const h = '/x/agentmake/src/pyharness';
+  assert.equal(stripPythonPath(`${h}:/home/me/lib`, h), '/home/me/lib');
+  assert.equal(stripPythonPath(h, h), '');
+});
+
+test('子进程：归进拉起它的运行的组；子进程先登记、父运行后到时组会被改对', () => {
+  const t = tmp();
+  try {
+    const s = new Store(t.file);
+    started(s, 'dsh', { kind: 'process' });
+    // dsh 某一轮对话里跑的命令：子进程比那次请求级运行先登记（请求级是惰性的）
+    started(s, 'kid', { kind: 'process', spawnedBy: 'dsh_r1' });
+    started(s, 'grandkid', { kind: 'process', spawnedBy: 'kid' });
+    assert.equal(s.getRun('kid')!.group_id, 'dsh_r1', '父运行还没到：先记成它的 id');
+    started(s, 'dsh_r1', { kind: 'request', parentRunId: 'dsh', trigger: 'POST /api/session/prompt' });
+    assert.equal(s.getRun('kid')!.group_id, 'dsh', '父运行到了：改成它所在的组');
+    assert.equal(s.getRun('grandkid')!.group_id, 'dsh', '子进程的子进程一起改');
+    assert.equal((s.getRun('kid') as { spawned_by?: string }).spawned_by, 'dsh_r1');
+
+    started(s, 'own', { kind: 'process', spawnedBy: 'dsh_r1', groupId: 'batch-7' });
+    assert.equal(s.getRun('own')!.group_id, 'batch-7', '显式给了 AGENTMAKE_GROUP 的不动');
   } finally {
     t.cleanup();
   }

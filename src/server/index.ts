@@ -26,6 +26,17 @@ import { analyze } from './writability.ts';
 import { applyEdit, applyEdits, backupOf, revert } from './patch.ts';
 import { Gate } from './gate.ts';
 import { langfuseTracer } from './langfuse.ts';
+import { buildHistory } from './history.ts';
+
+/** 进程还在不在（同一台机器）。被杀掉的进程收不到 run.ended，不能一直显示「在跑」 */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM'; // 在，只是不是我们的进程
+  }
+}
 import type { GatePhase } from './gate.ts';
 import type { AgentEvent } from '../shared/types.ts';
 
@@ -228,6 +239,20 @@ function json(res: http.ServerResponse, data: unknown, status = 200): void {
   res.end(body);
 }
 
+/** 请求本身有问题（坏 JSON）—— 回 400，不是服务出错的 500 */
+class BadRequest extends Error {}
+
+/** 读请求体并解析成 JSON。解析失败是调用方的错，单独标出来，别和服务内部的解析错误混在一起 */
+async function readJson(req: http.IncomingMessage): Promise<any> {
+  const text = await readBody(req);
+  if (!text.trim()) return {}; // 空请求体当空对象：各路由自己检查缺了哪个字段
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new BadRequest(`请求体不是合法的 JSON：${e instanceof Error ? e.message : e}`);
+  }
+}
+
 async function readBody(req: http.IncomingMessage, limitBytes = 32 * 1024 * 1024): Promise<string> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -280,6 +305,11 @@ const server = http.createServer(async (req, res) => {
     return json(res, { error: 'bad request' }, 400);
   }
   const route = url.pathname;
+  /** 正整数查询参数：缺了、写错了（limit=abc）、负数都用缺省值，太大的截到上限 —— 不让它变成 500 */
+  const intParam = (name: string, def: number, max: number): number => {
+    const v = Number(url.searchParams.get(name));
+    return Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), max) : def;
+  };
 
   const denied = localOnly(req);
   if (denied) return json(res, { error: denied }, 403);
@@ -304,7 +334,7 @@ const server = http.createServer(async (req, res) => {
         broadcastRaw,
         replay: (baseline: string, hash: string, runId?: string) => replayFor(baseline, hash, runId),
       };
-      const payload = JSON.parse(await readBody(req));
+      const payload = (await readJson(req));
       return json(
         res,
         route.endsWith('before')
@@ -315,8 +345,7 @@ const server = http.createServer(async (req, res) => {
 
     // ── harness 上报 ──
     if (route === '/ingest' && req.method === 'POST') {
-      const body = await readBody(req);
-      const { events } = JSON.parse(body) as { events: AgentEvent[] };
+      const { events } = (await readJson(req)) as { events: AgentEvent[] };
       for (const ev of events ?? []) record(ev);
       // 顺带把断点状态捎回去：harness 用它决定普通 HTTP 调用要不要走闸门。
       // HTTP 调用量可能上千，全部走闸门会白白多出上千次往返。
@@ -325,7 +354,7 @@ const server = http.createServer(async (req, res) => {
 
     // ── 断点闸门：命中时这个响应会一直悬着，被调试进程正阻塞在它上面 ──
     if (route === '/api/gate' && req.method === 'POST') {
-      const { event, phase } = JSON.parse(await readBody(req)) as {
+      const { event, phase } = (await readJson(req)) as {
         event: AgentEvent;
         phase: GatePhase;
       };
@@ -364,7 +393,7 @@ const server = http.createServer(async (req, res) => {
     // ── 断点配置与决策 ──
     if (route === '/api/breakpoints') {
       if (req.method === 'POST') {
-        const patch = JSON.parse(await readBody(req));
+        const patch = (await readJson(req));
         const bp = gate.setBreakpoints(patch);
         // 全关时必须放行已挂起的调用，否则被调试进程永远卡在那里
         if (!gate.anyArmed) gate.releaseAll();
@@ -375,7 +404,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (route === '/api/resume' && req.method === 'POST') {
-      const { callId, phase, armNext, ...decision } = JSON.parse(await readBody(req));
+      const { callId, phase, armNext, ...decision } = (await readJson(req));
       const ok = gate.resolve(callId, phase ?? 'llm.before', decision);
       // 单步：放行后立刻在下一次同类调用上再停一次
       if (armNext) {
@@ -432,7 +461,7 @@ const server = http.createServer(async (req, res) => {
 
     if (route === '/api/projects') {
       if (req.method === 'POST') {
-        const body = JSON.parse(await readBody(req)) as {
+        const body = (await readJson(req)) as {
           dir?: string; id?: string; cmd?: string; name?: string; trigger?: string;
         };
         if (body.id) {
@@ -486,7 +515,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (route === '/api/projects/start' && req.method === 'POST') {
-      const { id, replayFrom } = JSON.parse(await readBody(req)) as { id: string; replayFrom?: string };
+      const { id, replayFrom } = (await readJson(req)) as { id: string; replayFrom?: string };
       const row = store.getProject(id) as never as Record<string, unknown> | undefined;
       if (!row) return json(res, { error: '没有这个项目' }, 404);
       const p: projects.Project = {
@@ -512,7 +541,7 @@ const server = http.createServer(async (req, res) => {
 
     // 触发：服务型 agent 光启动不干活，得有人去戳它
     if (route === '/api/projects/trigger' && req.method === 'POST') {
-      const { id } = JSON.parse(await readBody(req)) as { id: string };
+      const { id } = (await readJson(req)) as { id: string };
       const row = store.getProject(id) as never as Record<string, unknown> | undefined;
       if (!row) return json(res, { error: '没有这个项目' }, 404);
       const r = projects.trigger(
@@ -527,18 +556,28 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (route === '/api/projects/stop' && req.method === 'POST') {
-      const { id } = JSON.parse(await readBody(req)) as { id: string };
+      const { id } = (await readJson(req)) as { id: string };
       return json(res, { ok: projects.stop(id) });
     }
 
     // ── 查询 API ──
     if (route === '/api/runs') {
       return json(res, store.listRuns(
-        Number(url.searchParams.get('limit') ?? 50),
+        intParam('limit', 50, 5000),
         url.searchParams.get('groupId') ?? undefined,
       ));
     }
     if (route === '/api/groups') return json(res, store.listGroups());
+    // 历史：按「一次干活」列，带任务原文和结果，给人找「上次那一次」用（见 history.ts）
+    if (route === '/api/history') {
+      return json(res, buildHistory({
+        ...store.historyRaw(),
+        alive: pidAlive,
+        now: Date.now(),
+        q: url.searchParams.get('q') ?? undefined,
+        limit: intParam('limit', 300, 2000),
+      }));
+    }
     if (route.startsWith('/api/runs/')) {
       const id = decodeURIComponent(route.slice('/api/runs/'.length));
       const run = store.getRun(id);
@@ -549,7 +588,8 @@ const server = http.createServer(async (req, res) => {
         res,
         store.listCalls(
           url.searchParams.get('runId') ?? undefined,
-          500,
+          // 页面选中一次运行时按 runId 单独取，老运行的调用也拿得到；不带 runId 的全量列表才用 500 的缺省
+          intParam('limit', 500, 20000),
           url.searchParams.get('node') ?? undefined,
         ),
       );
@@ -559,7 +599,7 @@ const server = http.createServer(async (req, res) => {
     // 在循环跑着的时候就能生效，不需要改代码也不需要重跑。
     if (route === '/api/loops') {
       if (req.method === 'POST') {
-        const { loopId, ...ov } = JSON.parse(await readBody(req));
+        const { loopId, ...ov } = (await readJson(req));
         loopOverrides.set(loopId, { ...(loopOverrides.get(loopId) ?? {}), ...ov });
         broadcastRaw({ type: 'loop.override', loopId, override: loopOverrides.get(loopId) });
         return json(res, { ok: true, override: loopOverrides.get(loopId) });
@@ -572,7 +612,7 @@ const server = http.createServer(async (req, res) => {
 
     // 循环断点：和 LLM 闸门同构 —— 命中时这个响应悬着，被调试进程停在轮次边界上
     if (route === '/api/loop-gate' && req.method === 'POST') {
-      const { runId: rid, loopId, iteration, armed } = JSON.parse(await readBody(req));
+      const { runId: rid, loopId, iteration, armed } = (await readJson(req));
       loopSeen.set(loopId, { loopId, runId: rid, iteration, at: Date.now() });
       broadcastRaw({ type: 'loop.iteration', loopId, runId: rid, iteration });
 
@@ -592,7 +632,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (route === '/api/loop-resume' && req.method === 'POST') {
-      const { loopId, action, override } = JSON.parse(await readBody(req));
+      const { loopId, action, override } = (await readJson(req));
       if (override) loopOverrides.set(loopId, { ...(loopOverrides.get(loopId) ?? {}), ...override });
       const w = loopWaiters.get(loopId);
       if (w) {
@@ -629,7 +669,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (route === '/api/source/apply' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      const body = (await readJson(req));
       const bad = writableSource(body.file);
       if (bad) return json(res, { ok: false, error: bad }, 403);
       // 多段（模板的几个静态片段）走原子批量：要么全写要么不动，撤销用同一份备份
@@ -639,7 +679,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (route === '/api/source/revert' && req.method === 'POST') {
-      const { file, backup } = JSON.parse(await readBody(req));
+      const { file, backup } = (await readJson(req));
       const bad = writableSource(file) ?? backupOf(file, backup);
       if (bad) return json(res, { ok: false, error: bad }, 403);
       const result = revert(file, backup);
@@ -675,7 +715,7 @@ const server = http.createServer(async (req, res) => {
     // 规则判定由服务端自己写（source=rule），这里只接 AI 和人的判定
     if (route === '/api/scores') {
       if (req.method === 'POST') {
-        const body = JSON.parse(await readBody(req));
+        const body = (await readJson(req));
         const source = body.source === 'human' ? 'human' : 'ai';
         const r = store.upsertScore({ ...body, source });
         if ('error' in r) return json(res, r, 400);
@@ -688,7 +728,7 @@ const server = http.createServer(async (req, res) => {
       }));
     }
     if (route === '/api/scores/delete' && req.method === 'POST') {
-      const { scoreId } = JSON.parse(await readBody(req));
+      const { scoreId } = (await readJson(req));
       const row = store.getScore(String(scoreId ?? ''));
       const ok = store.deleteScore(String(scoreId ?? ''));
       if (ok && row) broadcastScores(row.run_id, row.call_id);
@@ -701,7 +741,7 @@ const server = http.createServer(async (req, res) => {
         store.searchCalls(
           url.searchParams.get('q') ?? '',
           url.searchParams.get('runId') ?? undefined,
-          Number(url.searchParams.get('limit') ?? 20),
+          intParam('limit', 20, 500),
         ),
       );
     }
@@ -713,7 +753,7 @@ const server = http.createServer(async (req, res) => {
     if (route === '/api/spec') {
       const name = url.searchParams.get('name') || 'agent';
       if (req.method === 'POST') {
-        const spec = JSON.parse(await readBody(req)) as Spec;
+        const spec = (await readJson(req)) as Spec;
         spec.name = spec.name || name;
         spec.updatedAt = Date.now();
         store.putSpec(spec.name, spec);
@@ -732,7 +772,7 @@ const server = http.createServer(async (req, res) => {
 
     // 从一次实际运行反推规格草稿 —— 从零画图门槛太高，先跑一次再改
     if (route === '/api/spec/from-run' && req.method === 'POST') {
-      const { runId, name = 'agent' } = JSON.parse(await readBody(req)) as {
+      const { runId, name = 'agent' } = (await readJson(req)) as {
         runId?: string;
         name?: string;
       };
@@ -791,7 +831,7 @@ const server = http.createServer(async (req, res) => {
     }
     // ── 验证：拿历史请求批量回归 ──
     if (route === '/api/regress' && req.method === 'POST') {
-      const body = JSON.parse((await readBody(req)) || '{}');
+      const body = (await readJson(req)) ?? {};
       if (!body.baseline) return json(res, { error: '需要 baseline（出过问题的那个进程 / 运行组）' }, 400);
       const r = startRegression(regressDeps, body);
       return json(res, r, 'error' in r ? 400 : 200);
@@ -840,6 +880,9 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': MIME[path.extname(abs)] ?? 'application/octet-stream' });
     return res.end(data);
   } catch (err) {
+    // 请求本身有问题（坏 JSON、太大）是 4xx，不是服务出错
+    if (err instanceof BadRequest) return json(res, { error: err.message }, 400);
+    if (err instanceof Error && err.message === 'payload too large') return json(res, { error: err.message }, 413);
     return json(res, { error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });

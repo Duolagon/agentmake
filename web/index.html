@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>AgentMake · Agent 监视屏</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111'/%3E%3Ccircle cx='10' cy='16' r='3.5' fill='%234ade80'/%3E%3Ccircle cx='22' cy='10' r='3' fill='%2360a5fa'/%3E%3Ccircle cx='22' cy='22' r='3' fill='%23f87171'/%3E%3Cpath d='M13 15l6-4M13 17l6 4' stroke='%23ddd' stroke-width='1.6'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -11,9 +12,13 @@
 <!-- 顶栏只放「我在看哪次运行」和「怎么让它停下来」。
      四个阶段的断点开关是调试器的内部模型，不该是用户看到的第一屏 —— 收进「更多」。 -->
 <header>
+  <button id="railToggle" class="btn ghost railbtn" title="收起 / 展开左边的历史记录" aria-label="收起或展开历史">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor"/><line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor"/></svg>
+  </button>
   <span class="brand">AgentMake</span>
   <span id="status" class="pill pill-off">未连接</span>
-  <select id="runPicker" title="选择要看哪一次运行"></select>
+  <!-- 以前用它选运行；历史改到左边的会话栏（history.js）。留着不显示，别处的代码还在往里写 -->
+  <select id="runPicker" hidden></select>
   <span class="spacer"></span>
   <button id="bpNext" class="btn big" title="下一次 agent 调模型时把它停住，让你改 prompt 或伪造回答">
     ⏸ 停在下一次模型调用
@@ -54,6 +59,9 @@
   </div>
 </div>
 
+<div id="shell">
+<!-- 历史：像聊天记录那样常驻左边，标题是那次交给 agent 的任务。点一条，右边就是那次 -->
+<aside id="historyRail" aria-label="历史记录"></aside>
 <main>
   <!-- 「需要你看的」：自动发现的异常，按影响排序。点一条，图上只亮出相关路径 -->
   <aside id="alerts" aria-label="需要你看的"></aside>
@@ -166,6 +174,7 @@
     </div>
   </section>
 </main>
+</div>
 
 <!-- 导入向导：目录树由服务端提供（浏览器的目录选择器拿不到真实绝对路径） -->
 <div id="picker" hidden>

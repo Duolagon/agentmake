@@ -497,13 +497,22 @@ export function buildFlow(calls: CallRow[], loopEvents: LoopEvent[], runId: stri
           if (e.data) { e.data.last = m; e.data.waiting = true; }
           else e.data = { samples: 0, dropped: 0, last: m, droppedRuns: [], exampleCallId: null, waiting: true };
         } else {
-          const m = measure(done, c);
-          noteData(e, m, rid, c.call_id);
-          if (m.used != null || m.coverage != null) {
-            span.input = {
-              from: prev, items: m.items, used: m.used, coverage: m.coverage, bytes: m.bytes,
-              dropped: isDropped(m), missing: m.missing ?? [],
-            };
+          // 只有在下游开始之前就跑完的上游才可能喂给它 —— 并发的两次调用只是时间上挨着
+          // （dsh 一边跑主 agent、一边起会话标题），拿它们对账只会得出「数据全丢了」的误报。
+          // 留 1 秒余量：探针在后台读流式回答的副本，记下的结束时间会比 agent 实际拿到回答晚一点
+          const fed = done.filter((b) => b.started_at == null || c.started_at == null || b.started_at + (b.duration_ms ?? 0) <= c.started_at + 1000);
+          const m = fed.length ? measure(fed, c) : null;
+          // 一个字都没用上，但下游的数据明显来自更早的另一次调用（主 agent 接着自己上一轮往下走）：
+          // 紧挨着的那一步只是旁路，不是它的数据来源，不算「丢了」。
+          // 真丢了的（规划的结果没进执行的 prompt），下游哪儿也找不到来源，照报
+          if (m && !(m.coverage === 0 && m.items == null && fedByEarlier(history.slice(0, history.length - batch.length), c))) {
+            noteData(e, m, rid, c.call_id);
+            if (m.used != null || m.coverage != null) {
+              span.input = {
+                from: prev, items: m.items, used: m.used, coverage: m.coverage, bytes: m.bytes,
+                dropped: isDropped(m), missing: m.missing ?? [],
+              };
+            }
           }
         }
       }
@@ -623,4 +632,14 @@ function assignRows(steps: FlowStep[]): void {
     }
     b.s.row = row;
   }
+}
+
+/** 下游的 prompt 是不是主要由更早的某次调用喂的（只看最近 20 次，够覆盖一轮 agent 循环） */
+function fedByEarlier(earlier: { call: CallRow }[], consumer: CallRow): boolean {
+  for (const { call } of earlier.slice(-20).reverse()) {
+    if (call.duration_ms == null) continue;
+    const m = measure([call], consumer);
+    if (m.coverage != null && m.coverage >= 0.5) return true;
+  }
+  return false;
 }

@@ -10,6 +10,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
+import type { HistoryRun, RunStats } from './history.ts';
 import type { AgentEvent, HttpBody, HttpCall, LLMAfter, LLMBefore, LLMPatched, RunStarted } from '../shared/types.ts';
 import { checkCall, type RuleInput } from './rules.ts';
 
@@ -81,6 +82,13 @@ export type CallRow = {
  * 绑定参数要给三遍同一个 id（见 scope()）。
  */
 const SCOPE = '(SELECT run_id FROM runs WHERE run_id=? OR parent_run_id=? OR group_id=?)';
+
+/**
+ * 读出来给页面 / 流程 / 异常用的 error 列。早先流式调用读完就被调用方 abort 掉（dsh 那样），
+ * 探针把「This operation was aborted」记成了错误 —— 但 HTTP 成功、结束信号也收到了，那不是失败。
+ * 库里的原始记录不动，读的时候按真实情况算。
+ */
+const ERROR_COL = `CASE WHEN ok = 1 AND finish_reason IS NOT NULL THEN NULL ELSE error END AS error`;
 const scope = (id: string) => [id, id, id];
 
 /**
@@ -263,6 +271,7 @@ export class Store {
         ['request_ctype', 'TEXT'],
         ['request_body', 'TEXT'],
         ['request_truncated', 'INTEGER DEFAULT 0'],
+        ['spawned_by', 'TEXT'],
       ]],
     ];
     for (const [t, cols] of tableCols) {
@@ -414,28 +423,39 @@ export class Store {
    * **补全**字段，而不是什么都不做（否则请求级运行会丢掉它的父运行和触发请求）。
    */
   private upsertRun(ev: RunStarted): void {
-    // 组：显式给的 > 父运行的组 > 自己
+    const groupOf = (id: string) =>
+      (this.db.prepare('SELECT group_id FROM runs WHERE run_id=?').get(id) as { group_id: string | null } | undefined)?.group_id ?? id;
+    // 组：显式给的 > 父运行的组（请求挂进程）> 拉起它的运行的组（子进程挂父进程）> 自己
     const group = ev.groupId ??
-      (ev.parentRunId
-        ? ((this.db.prepare('SELECT group_id FROM runs WHERE run_id=?').get(ev.parentRunId) as { group_id: string | null } | undefined)
-            ?.group_id ?? ev.parentRunId)
-        : ev.runId);
+      (ev.parentRunId ? groupOf(ev.parentRunId) : ev.spawnedBy ? groupOf(ev.spawnedBy) : ev.runId);
     this.db
       .prepare(
-        `INSERT INTO runs (run_id, cwd, argv, pid, started_at, kind, parent_run_id, group_id, trigger, replay_of)
-         VALUES (?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO runs (run_id, cwd, argv, pid, started_at, kind, parent_run_id, group_id, trigger, replay_of, spawned_by)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(run_id) DO UPDATE SET
            cwd = excluded.cwd, argv = excluded.argv, pid = excluded.pid,
            started_at = MIN(runs.started_at, excluded.started_at),
            kind = excluded.kind, parent_run_id = excluded.parent_run_id,
            group_id = excluded.group_id, trigger = excluded.trigger,
            -- run.started 里显式给的基线优先（回归请求带着精确的基线请求）；没给才保留查缓存时记下的
-           replay_of = COALESCE(excluded.replay_of, runs.replay_of)`,
+           replay_of = COALESCE(excluded.replay_of, runs.replay_of),
+           spawned_by = excluded.spawned_by`,
       )
       .run(
         ev.runId, ev.cwd, JSON.stringify(ev.argv), ev.pid, ev.ts,
-        ev.kind ?? 'process', ev.parentRunId ?? null, group, ev.trigger ?? null, ev.replayOf ?? null,
+        ev.kind ?? 'process', ev.parentRunId ?? null, group, ev.trigger ?? null, ev.replayOf ?? null, ev.spawnedBy ?? null,
       );
+    // 子进程可能比拉起它的运行先登记（事件经不同的连接到达）—— 那时只能先把组记成父运行的 id；
+    // 父运行到了再把这些临时记下的（子进程以及子进程的子进程）改到正确的组。
+    // 只改临时值：子进程自己显式给了 AGENTMAKE_GROUP 的不动
+    if (group !== ev.runId) {
+      this.db
+        .prepare(`WITH RECURSIVE kids(id) AS (
+                    SELECT run_id FROM runs WHERE spawned_by = ?
+                    UNION SELECT r.run_id FROM runs r JOIN kids k ON r.spawned_by = k.id)
+                  UPDATE runs SET group_id = ? WHERE run_id IN (SELECT id FROM kids) AND group_id = ?`)
+        .run(ev.runId, group, ev.runId);
+    }
   }
 
   /** 这次运行在用谁做重放基线。第一次查缓存时记下，之后不改 —— 用于对比时自动找基线 */
@@ -695,6 +715,56 @@ export class Store {
       .all(...((groupId ? [groupId, limit] : [limit]) as never[]));
   }
 
+  /** 历史面板的原料：运行、每个运行的调用统计、判定失败数、第一条用户消息（任务原文） */
+  historyRaw(maxRuns = 5000): {
+    runs: HistoryRun[];
+    stats: Map<string, RunStats>;
+    failing: Map<string, number>;
+    tasks: Map<string, string | null>;
+  } {
+    const runs = this.db
+      .prepare(`SELECT run_id, kind, parent_run_id, spawned_by, trigger, cwd, argv, pid, started_at, ended_at, replay_of
+                FROM runs ORDER BY started_at DESC LIMIT ?`)
+      .all(maxRuns) as HistoryRun[];
+    const stats = new Map<string, RunStats>();
+    // 「失败」只算真失败：HTTP 层失败，或者有错误且没拿到结束信号 ——
+    // 早先流式调用读完就被调用方 abort 的，会留下错误文本但 finish_reason 是全的，那不是失败
+    for (const r of this.db
+      .prepare(`SELECT run_id,
+                       SUM(kind='llm') AS llm, SUM(kind!='llm') AS tool,
+                       COALESCE(SUM(input_tokens),0) AS tokensIn, COALESCE(SUM(output_tokens),0) AS tokensOut,
+                       SUM(ok=0 OR (error IS NOT NULL AND finish_reason IS NULL AND kind='llm')) AS errors,
+                       SUM(duration_ms IS NULL) AS pending,
+                       MIN(started_at) AS firstAt, MAX(started_at + COALESCE(duration_ms,0)) AS lastAt,
+                       GROUP_CONCAT(DISTINCT model) AS models
+                FROM calls GROUP BY run_id`)
+      .all() as (RunStats & { run_id: string })[]) {
+      stats.set(r.run_id, r);
+    }
+    const failing = new Map<string, number>();
+    for (const r of this.db
+      .prepare(`SELECT run_id, COUNT(DISTINCT COALESCE(call_id, 'run:' || run_id)) AS n FROM scores WHERE passed=0 GROUP BY run_id`)
+      .all() as { run_id: string; n: number }[]) {
+      failing.set(r.run_id, r.n);
+    }
+    // 每个运行最早那次模型调用里的第一条用户消息 —— 人靠它认出「这是哪一次」
+    const tasks = new Map<string, string | null>();
+    for (const r of this.db
+      .prepare(`SELECT c.run_id, c.messages FROM calls c
+                WHERE c.kind='llm' AND c.seq = (SELECT MIN(x.seq) FROM calls x WHERE x.run_id = c.run_id AND x.kind='llm')`)
+      .all() as { run_id: string; messages: string | null }[]) {
+      let text: string | null = null;
+      try {
+        const msgs = JSON.parse(r.messages ?? '[]') as { role: string; content: string }[];
+        text = msgs.find((m) => m.role === 'user' && m.content)?.content ?? null;
+      } catch {
+        text = null;
+      }
+      tasks.set(r.run_id, text);
+    }
+    return { runs, stats, failing, tasks };
+  }
+
   /** 运行组概况：一组里有几次运行、多少调用、多少判定失败 */
   listGroups(limit = 50): unknown[] {
     return this.db
@@ -717,7 +787,7 @@ export class Store {
   listCalls(runId?: string, limit = 500, node?: string): unknown[] {
     // faked / replayed 必须带上：UI 靠它们显示徽章，漏了会导致刷新页面后徽章消失
     const cols = `call_id, run_id, seq, kind, method, url, provider, model, status, ok, duration_ms,
-                  input_tokens, output_tokens, cache_read_tokens, error, streaming,
+                  input_tokens, output_tokens, cache_read_tokens, ${ERROR_COL}, streaming,
                   faked, replayed, patched, request_hash, started_at,
                   (SELECT group_concat(s.name) FROM scores s
                     WHERE s.call_id = calls.call_id AND s.passed = 0) AS failing,
@@ -746,7 +816,10 @@ export class Store {
   }
 
   getCall(callId: string): unknown {
-    return this.db.prepare('SELECT * FROM calls WHERE call_id=?').get(callId);
+    const c = this.db.prepare('SELECT * FROM calls WHERE call_id=?').get(callId) as Record<string, unknown> | undefined;
+    // 同 ERROR_COL：成功且收到结束信号的，残留的「aborted」不算错误
+    if (c && c.ok === 1 && c.finish_reason != null && c.error != null) c.error = null;
+    return c;
   }
 
   /** 全文搜索 prompt / 响应。给 MCP 用 —— AI 常常是「我记得有句话…」这样找起的 */
@@ -836,7 +909,7 @@ export class Store {
   flowCalls(runId?: string): unknown[] {
     const cols = `call_id, run_id, seq, kind, provider, model, url, method, frames,
                   system, messages, response_text, response_tool_calls, duration_ms,
-                  input_tokens, output_tokens, ok, error, started_at, request_hash, replayed,
+                  input_tokens, output_tokens, ok, ${ERROR_COL}, started_at, request_hash, replayed,
                   response_body, response_bytes, body_truncated`;
     const rid = runId ?? this.latestRunId();
     if (!rid) return [];
@@ -847,7 +920,7 @@ export class Store {
   callsOfRun(runId: string): unknown[] {
     const cols = `call_id, run_id, seq, kind, provider, model, url, method, frames,
                   system, messages, response_text, response_tool_calls, duration_ms,
-                  input_tokens, output_tokens, ok, error, started_at, request_hash, replayed,
+                  input_tokens, output_tokens, ok, ${ERROR_COL}, started_at, request_hash, replayed,
                   response_body, response_bytes, body_truncated, status`;
     return this.db.prepare(`SELECT ${cols} FROM calls WHERE run_id=? ORDER BY seq`).all(runId);
   }

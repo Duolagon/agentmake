@@ -15,7 +15,7 @@
     "serve": "node src/server/index.ts",
     "dev": "node --watch src/server/index.ts",
     "mcp": "node src/mcp/server.ts",
-    "test": "node --test test/denormalize.test.ts test/jsscan.test.ts test/writeback.test.ts test/flow.test.ts test/spec.test.ts test/toolcalls.test.ts test/scores.test.ts test/runs.test.ts test/dataflow.test.ts test/trace.test.ts test/verify.test.ts test/protocols.test.ts test/loops.test.ts test/hash.test.ts test/projects.test.ts",
+    "test": "node --test test/denormalize.test.ts test/jsscan.test.ts test/writeback.test.ts test/flow.test.ts test/spec.test.ts test/toolcalls.test.ts test/scores.test.ts test/runs.test.ts test/dataflow.test.ts test/trace.test.ts test/verify.test.ts test/protocols.test.ts test/loops.test.ts test/hash.test.ts test/projects.test.ts test/history.test.ts",
     "test:e2e": "node test/run-e2e.mjs",
     "test:all": "npm run test && npm run test:e2e"
   },

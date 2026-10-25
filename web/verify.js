@@ -239,7 +239,21 @@ function runLabel(r) {
   const tail = String(r.run_id).split('_').pop();
   return r.kind === 'request'
     ? `${t} ${tail} ${r.trigger ?? ''}${r.replay_of ? ' · 重放' : ''}`
-    : `${t} ${(r.cwd || '').split('/').pop() || tail}${r.replay_of ? ' · 重放' : ''}`;
+    : `${t} ${progName(r)}${r.replay_of ? ' · 重放' : ''}`;
+}
+
+/**
+ * 进程叫什么：跑的是哪个程序（dsh web、run-e2e.mjs、agent.py）+ 在哪个目录。
+ * 只用目录名的话，同一个工程里起的十几个进程全叫「agentmake」，分不出谁是谁。
+ */
+export function progName(r) {
+  let argv = r.argv;
+  if (typeof argv === 'string') { try { argv = JSON.parse(argv); } catch { argv = []; } }
+  const a0 = Array.isArray(argv) && argv[0] ? String(argv[0]).split('/').pop() : '';
+  const a1 = Array.isArray(argv) && argv[1] && !String(argv[1]).startsWith('-') && !String(argv[1]).includes('/') ? ` ${argv[1]}` : '';
+  const dir = (r.cwd || '').split('/').pop();
+  if (!a0) return dir || String(r.run_id).split('_').pop();
+  return `${a0}${a1}${dir ? ` · ${dir}` : ''}`;
 }
 
 const RULES = {

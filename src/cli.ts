@@ -26,10 +26,13 @@ switch (cmd) {
     break;
 
   case 'attach': {
-    const url = (process.env.AGENTMAKE_URL || 'http://127.0.0.1:8787').replace(/\/$/, '');
+    // 调试器不在默认端口时（AGENTMAKE_PORT / AGENTMAKE_URL），命令里必须带上 AGENTMAKE_URL ——
+    // 否则探针按缺省连 8787，记录要么丢了，要么报到另一个实例里去
+    const url = (process.env.AGENTMAKE_URL || `http://127.0.0.1:${process.env.AGENTMAKE_PORT || 8787}`).replace(/\/$/, '');
+    const target = url === 'http://127.0.0.1:8787' ? '' : `AGENTMAKE_URL=${url} `;
     console.log('在你的项目目录下执行（代码一行不改）：\n');
-    console.log(`  Node:    NODE_OPTIONS="--import ${path.join(HERE, 'harness/register.ts')}" node your-app.mjs`);
-    console.log(`  Python:  PYTHONPATH="${path.join(HERE, 'pyharness')}" python -m agentmake your_agent.py`);
+    console.log(`  Node:    ${target}NODE_OPTIONS="--import ${path.join(HERE, 'harness/register.ts')}" node your-app.mjs`);
+    console.log(`  Python:  ${target}PYTHONPATH="${path.join(HERE, 'pyharness')}" python -m agentmake your_agent.py`);
     console.log(`  其它语言: OPENAI_BASE_URL=${url}/p/openai/v1  <你的启动命令>`);
     console.log(`\n或者直接打开 ${url}，在页面上导入项目、点 ▶ 启动。`);
     break;
@@ -49,6 +52,8 @@ switch (cmd) {
         '环境变量：',
         '  AGENTMAKE_PORT       调试器端口，默认 8787',
         '  AGENTMAKE_DB         数据库路径',
+        '  AGENTMAKE_URL        探针 / MCP 连哪个调试器，默认 http://127.0.0.1:8787',
+        '  AGENTMAKE_CHILDREN=0 被调试进程拉起的子进程不带探针（默认带，并挂在父运行下面）',
         '  AGENTMAKE=0          在被调试进程里彻底关掉探针',
       ].join('\n'),
     );

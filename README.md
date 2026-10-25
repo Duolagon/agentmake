@@ -36,6 +36,12 @@ npm start          # → http://127.0.0.1:8787
 `AGENTMAKE_REQUEST_RUNS=0` 关掉切分。
 
 **运行组**：`AGENTMAKE_GROUP=<名字>` 把一批运行归到一起（比如一轮回归）；缺省时组就是进程自己。
+
+**子进程**：探针随 `NODE_OPTIONS` / `PYTHONPATH` 传给被调试程序拉起的每个子进程（Node、Python 都算）。
+子进程记着是谁拉起的它，挂在父运行下面显示、归进父运行的组，页面不会自动跳过去 ——
+在请求里拉起的（比如 dsh 某一轮对话里用 bash 跑的 `npm test`）记到那次请求上。
+例外是父运行自己不调模型的包装进程（`npm start` → `node agent.mjs`）：那时跟随的就是子进程。
+不想观测子进程（agent 会跑测试、构建之类的命令）就设 `AGENTMAKE_CHILDREN=0`，子进程完全不带探针。
 **重放基线**：`AGENTMAKE_REPLAY` 可以给一次运行、一个进程（连同它的请求）或一个组。
 重放出来的运行会记住基线，`compare_runs` 只给 runB 就能比；常驻服务的请求会对上基线里「同一触发请求的同一次」。
 
@@ -77,7 +83,14 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787/p/anthropic  <你的启动命令>
 
 **实时观看：数据流、循环、规则判定都画在图上**
 
-监视屏三栏：左边「需要你看的」、中间数据流 + 时间线、右边详情。
+监视屏：最左边是**历史会话栏**，然后是「需要你看的」、中间数据流 + 时间线、右边详情。
+
+- **历史会话栏**（像聊天记录）：一条 = 一次干活，标题是那次交给 agent 的任务原文（第一条用户消息，
+  框架拼在后面的运行时上下文会去掉），下面一行是时间、程序、调了几次模型 / 工具、token、时长、失败数，
+  圆点表示在跑 / 完成 / 有失败 / 中断。按天分组，能搜任务、程序、模型，能只看有问题的或在跑的。
+  常驻服务（dsh web 这种）每一轮对话各自一条；被拉起的子进程挂在拉起它的那一条下面；一次模型都没调过的
+  （健康检查、空进程、只抓数据的脚本）不列，只在底部报个数。打开页面默认显示最近一次干过活的那一条。
+  左上角的按钮可以收起它。
 
 - **数据流图**（从左往右是执行顺序）：连线上写的是**真实流过去的数据** ——
   `12 条 → 5 条 ✂`（上游给的列表，下游 prompt 里只出现了几条）、`3.1KB · 进了 prompt 42%`。
@@ -300,7 +313,7 @@ src/
               jsscan · writability · patch —— 源码定位与回写
   mcp/        MCP server（手写 JSON-RPC，给 AI 用）
 web/          常驻监视屏
-test/         mock LLM · Node/Python fixture · 单测 · 7 个 e2e 套件
+test/         mock LLM · Node/Python fixture · 单测 · 13 个 e2e 套件
 docs/         架构设计
 ```
 
@@ -342,8 +355,8 @@ docs/         架构设计
 ```bash
 npm start                # 调试器
 npm run dev              # 同上，带 --watch
-npm test                 # 153 条单测（归一化 / Responses 与流式协议 / 工具调用 / 评分与规则判定 / 运行组 / 数据流与异常 / 追查 / 验证与回归 / 回写 / 流程推导 / 对账）
-npm run test:e2e         # 12 个 e2e 套件，自己起 mock 和 server，跑完收摊
+npm test                 # 195 条单测（归一化 / Responses 与流式协议 / 重放指纹 / 工具调用 / 评分与规则判定 / 运行组与子进程 / 历史会话栏 / 数据流与异常 / 追查 / 验证与回归 / 回写 / 循环插桩语义 / 流程推导 / 对账）
+npm run test:e2e         # 13 个 e2e 套件，自己起 mock 和 server，跑完收摊（固定用 8787 / 8799，跑之前先停掉在用这两个端口的调试器）
 npm run test:all
 ```
 
@@ -357,7 +370,9 @@ e2e 套件：`breakpoint`（断点真的改到了模型）· `mcp`（协议 + �
 追查：prompt 来源拆解指到 `slice(-5)` 那一行、跨请求对比得出「丢了数据的判 normal、没丢的判 urgent」；
 验证：改好的服务起来后批量回归，2 个改对、1 个没变坏且全走缓存，逐步对齐 ★ 在 analyze）·
 `clients`（node:http / gzip / 读流 / 四种协议的流 / Responses API，带不带探针结果一字不差、重放 0 次真打、node:http 上的断点能改写能伪造；
-Python 的 aiohttp 与 httpx 流式要设 `AGENTMAKE_PY_DEPS` 指向装了 aiohttp、openai 的解释器，否则跳过）。
+二进制响应原样透传、`fetch(Request)`、读完流就 abort 自己的 signal、子进程归属与 `AGENTMAKE_CHILDREN=0`；
+Python 的 aiohttp 与 httpx 流式要设 `AGENTMAKE_PY_DEPS` 指向装了 aiohttp、openai 的解释器，否则跳过）·
+`security`（畸形 Host、DNS 重绑定、外站 Origin、源码回写 / 还原的路径限制）。
 
 `python.e2e` 里 httpx 那一节在没装 httpx 时会**明说跳过**而不是静默略过；
 `AGENTMAKE_PY_HTTPX=/path/to/venv/bin/python` 可以指定带 httpx 的解释器。
@@ -365,7 +380,7 @@ Python 的 aiohttp 与 httpx 流式要设 `AGENTMAKE_PY_DEPS` 指向装了 aioht
 `run-e2e.mjs` 会先检查 8787/8799 是否被占用并**直接退出** —— 这个坑真踩过：
 端口被一个残留的旧 server 占着，整轮测试打在那个跑着旧代码的进程上，两条断言"失败"其实是假的。
 
-环境变量：`AGENTMAKE_REPLAY=<runId>` 开启重放 · `AGENTMAKE_PORT`(8787) · `AGENTMAKE_DB` · `AGENTMAKE_URL`（harness 用）· `AGENTMAKE=0` 关闭拦截 · `AGENTMAKE_DEBUG=1` 打印安装错误 · `AGENTMAKE_BREAK_TIMEOUT_MS`(600000) 断点最长挂起 · `AGENTMAKE_MAX_HTTP`(5000) 单次运行记录的普通 HTTP 上限 · `AGENTMAKE_NODE_HTTP=0` 不拦 node:http · `AGENTMAKE_BODY_BYTES`(262144) 响应体最多记多少
+环境变量：`AGENTMAKE_REPLAY=<runId>` 开启重放 · `AGENTMAKE_PORT`(8787) · `AGENTMAKE_DB` · `AGENTMAKE_URL`（harness 用）· `AGENTMAKE_CHILDREN=0` 子进程不带探针 · `AGENTMAKE=0` 关闭拦截 · `AGENTMAKE_DEBUG=1` 打印安装错误 · `AGENTMAKE_BREAK_TIMEOUT_MS`(600000) 断点最长挂起 · `AGENTMAKE_MAX_HTTP`(5000) 单次运行记录的普通 HTTP 上限 · `AGENTMAKE_NODE_HTTP=0` 不拦 node:http · `AGENTMAKE_BODY_BYTES`(262144) 响应体最多记多少
 
 ### Langfuse tracing（可选）
 

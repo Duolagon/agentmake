@@ -106,7 +106,20 @@ export async function detect(dir: string): Promise<{ kind: string; cmd: string; 
   const exists = async (f: string) => !!(await stat(path.join(dir, f)).catch(() => null));
 
   if (await exists('package.json')) {
-    const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8').catch(() => '{}'));
+    // package.json 写坏了不该让导入整个失败（以前直接 500）—— 当它不存在，继续按入口文件找
+    let pkg: { main?: string; scripts?: { start?: string } } = {};
+    let pkgBad = false;
+    try {
+      pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8').catch(() => '{}')) ?? {};
+    } catch {
+      pkgBad = true;
+    }
+    if (pkgBad) {
+      for (const e of NODE_ENTRIES) {
+        if (await exists(e)) return { kind: 'node', cmd: `node ${e}`, note: `找到入口 ${e}（package.json 不是合法的 JSON，已忽略）` };
+      }
+      return { kind: 'node', cmd: 'node .', note: 'package.json 不是合法的 JSON，没认出入口，请自己改命令' };
+    }
     for (const e of NODE_ENTRIES) {
       if (await exists(e)) return { kind: 'node', cmd: `node ${e}`, note: `找到入口 ${e}` };
     }

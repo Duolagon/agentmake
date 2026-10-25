@@ -32,6 +32,8 @@ from . import loops, stack, transport
 
 RUN_ID = os.environ.get("AGENTMAKE_RUN_ID") or f"run_py{int(time.time() * 1000):x}_{uuid.uuid4().hex[:6]}"
 REPLAY_BASELINE = os.environ.get("AGENTMAKE_REPLAY") or None
+# 被另一个带探针的进程拉起的：父运行是谁。必须在 _children() 改写环境变量之前读
+SPAWNED_BY = os.environ.get("AGENTMAKE_SPAWNED_BY") or None
 
 _seq = 0
 _call_no = 0
@@ -882,6 +884,38 @@ class _PatchOnImport(importlib.abc.MetaPathFinder):
 
 _installed = False
 
+_PY_HARNESS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_NODE_REGISTER = os.path.join(os.path.dirname(_PY_HARNESS), "harness", "register.ts")
+
+
+def _children() -> None:
+    """子进程继承探针（PYTHONPATH / NODE_OPTIONS）。和 Node 侧同一套约定：
+
+    默认照传，但告诉子进程「谁拉起了你」，服务端把它挂在这次运行下面；
+    AGENTMAKE_CHILDREN=0 时把探针从环境变量里摘掉，子进程什么都不报。
+    """
+    try:
+        if os.environ.get("AGENTMAKE_CHILDREN") == "0":
+            pp = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+                  if p and os.path.abspath(p) != _PY_HARNESS]
+            if pp:
+                os.environ["PYTHONPATH"] = os.pathsep.join(pp)
+            else:
+                os.environ.pop("PYTHONPATH", None)
+            no = os.environ.get("NODE_OPTIONS", "")
+            for form in (f"--import {_NODE_REGISTER}", f"--import={_NODE_REGISTER}",
+                         f'--import "{_NODE_REGISTER}"', f"--import '{_NODE_REGISTER}'"):
+                no = no.replace(form, "")
+            no = " ".join(no.split())
+            if no:
+                os.environ["NODE_OPTIONS"] = no
+            else:
+                os.environ.pop("NODE_OPTIONS", None)
+            return
+        os.environ["AGENTMAKE_SPAWNED_BY"] = RUN_ID
+    except Exception:  # noqa: BLE001 —— 观测绝不能影响被调试程序
+        pass
+
 
 def install() -> None:
     global _installed
@@ -903,8 +937,10 @@ def install() -> None:
             # 和 Node 侧同一套字段：运行组、重放基线。值为 None 时服务端按缺省处理
             "groupId": os.environ.get("AGENTMAKE_GROUP") or None,
             "replayOf": REPLAY_BASELINE,
+            "spawnedBy": SPAWNED_BY,
         }
     )
+    _children()
 
     _patch_urllib()
     for name, patch in _TARGETS.items():

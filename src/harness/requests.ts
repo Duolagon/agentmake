@@ -70,6 +70,15 @@ export function currentRunId(): string {
   return r.runId;
 }
 
+/**
+ * 只读不登记：在一个已经登记过的请求里就是那个请求，否则是进程本身。
+ * 拉起子进程时用它 —— 请求里拉了个 git / open 之类不带探针的命令，不该因此冒出一个空的请求级运行
+ */
+export function peekRunId(): string {
+  const r = als.getStore();
+  return r?.started ? r.runId : processRunId;
+}
+
 /** 当前请求带来的基线（回归重发时才有） */
 export function currentBaseline(): string | null {
   return als.getStore()?.baseline ?? null;

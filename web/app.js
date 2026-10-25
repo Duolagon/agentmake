@@ -9,9 +9,10 @@ import { initFlow, renderFlow, setSelectedStep, setHighlight, noteLoopEvent, sum
 import { initAlerts, renderAlerts, clearAlert } from './alerts.js';
 import { initTimeline, renderTimeline } from './timeline.js';
 import { initCompare, loadCompare, refreshCompare } from './compare.js';
-import { initVerify, loadVerify, noteRegress } from './verify.js';
+import { initVerify, loadVerify, noteRegress, progName } from './verify.js';
 import { initSpec, loadSpec, flowAnnotations } from './spec.js';
 import { initProjects, noteProcEvent } from './projects.js';
+import { initHistory, loadHistory, renderHistory, scheduleHistory } from './history.js';
 
 const $ = (id) => document.getElementById(id);
 const calls = new Map();
@@ -49,17 +50,23 @@ function applyEvent(ev) {
   switch (ev.type) {
     case 'run.started': {
       const parent = ev.parentRunId ?? null;
+      const spawner = ev.spawnedBy ?? null;
+      const groupOf = (id) => runs.get(id)?.group_id ?? id;
       runs.set(ev.runId, {
         ...(runs.get(ev.runId) ?? {}),
-        run_id: ev.runId, cwd: ev.cwd, started_at: ev.ts,
-        kind: ev.kind ?? 'process', parent_run_id: parent,
-        group_id: ev.groupId ?? (parent ? runs.get(parent)?.group_id ?? parent : ev.runId),
+        run_id: ev.runId, cwd: ev.cwd, argv: ev.argv, started_at: ev.ts,
+        kind: ev.kind ?? 'process', parent_run_id: parent, spawned_by: spawner,
+        group_id: ev.groupId ?? (parent ? groupOf(parent) : spawner ? groupOf(spawner) : ev.runId),
         trigger: ev.trigger ?? null, replay_of: ev.replayOf ?? null,
       });
       // 新运行开始就跟过去 —— 监视屏应该显示「正在发生的事」。
       // 例外：正看着整个进程（它处理过的所有请求）时，新请求进来不要把视图跳走
       // 验证视图里也不跟：批量回归会一口气冒出一串新运行，正在看的对比不能被它们冲走
-      if (!(parent && currentRun === parent) && view !== 'verify') currentRun = ev.runId;
+      // 被拉起的子进程也不跟（dsh 用 bash 跑的 npm test 之类）—— 除非拉起它的是个自己不调模型的
+      // 包装进程（npm start → node agent.mjs），那真正要看的就是这个子进程
+      const follow = spawner ? !hasOwnCalls(spawner) : !(parent && currentRun === parent);
+      if (follow && view !== 'verify') currentRun = ev.runId;
+      scheduleHistory();
       renderRunPicker();
       renderList();
       scheduleGraph();
@@ -67,6 +74,7 @@ function applyEvent(ev) {
     }
 
     case 'run.ended': {
+      scheduleHistory();
       const r = runs.get(ev.runId);
       if (r) { r.ended_at = ev.ts; if (ev.httpStatus != null) r.http_status = ev.httpStatus; renderRunPicker(); }
       break;
@@ -94,7 +102,7 @@ function applyEvent(ev) {
         faked: ev.faked ? 1 : 0,
         replayed: ev.replayed ? 1 : 0,
       });
-      renderList(); scheduleGraph();
+      renderList(); scheduleGraph(); scheduleHistory(2500);
       if (selectedCall === ev.callId) showDetail(ev.callId);
       break;
     }
@@ -542,10 +550,23 @@ function onAlert(a) {
 }
 
 /** 切换到某次运行（运行选择器、时间线泳道都走这里） */
+/**
+ * 补齐一次运行的全部调用。页面打开时只拉了最近 500 次（全局），老运行、调用多的运行
+ * 会缺一截 —— 流程图（服务端算）有 81 次，左边列表却是空的。选中时按 runId 单独取。
+ */
+async function loadRunCalls(runId) {
+  if (!runId) return;
+  const rows = await fetch(`/api/calls?runId=${encodeURIComponent(runId)}&limit=20000`).then((r) => r.json()).catch(() => []);
+  if (!Array.isArray(rows)) return;
+  for (const c of rows) calls.set(c.call_id, { ...(calls.get(c.call_id) ?? {}), ...c });
+}
+
 async function selectRun(runId) {
   currentRun = runId || null;
   clearAlert();
   renderRunPicker();
+  renderHistory();
+  await loadRunCalls(currentRun);
   await applyNodeFilter(null);
   renderList();
   loadGraph();
@@ -581,7 +602,7 @@ function timelineData() {
       const tail = String(r.run_id).split('_').pop();
       return {
         runId: r.run_id,
-        label: r.kind === 'request' ? `${tail} ${r.trigger ?? ''}` : (r.cwd || '').split('/').pop() || tail,
+        label: r.kind === 'request' ? `${tail} ${r.trigger ?? ''}` : progName(r),
         title: `${r.run_id}${r.trigger ? ` · ${r.trigger}` : ''}${r.http_status ? ` → ${r.http_status}` : ''}`,
         flag: bad ? `✗${bad}` : '',
         calls: cs,
@@ -618,6 +639,20 @@ async function applyNodeFilter(nodeId) {
  * 「先导入一个项目」—— 项目已经导入、甚至已经跑起来了还这么说，等于在骗人。
  */
 function renderEmpty() {
+  // 选中了一次运行（或者已经有探针接进来的运行）却没有调用：说这次运行的情况，
+  // 不要再劝人「先导入一个项目」—— 在终端里挂探针跑的根本不需要导入
+  const sel = currentRun ? runs.get(currentRun) : null;
+  if (sel || (runs.size && !knownProjects.length)) {
+    const ended = !!sel?.ended_at;
+    $('emptyTitle').textContent = !sel ? '还没有调用' : ended ? '这次运行没有发出调用' : '这次运行还没有发出调用';
+    $('emptyHint').innerHTML = !sel
+      ? '在上面选一次运行看它的流程。'
+      : ended
+        ? `<b>${esc(progName(sel))}</b> 已经结束，全程没有调模型、也没有发 HTTP 请求。如果它只是个包装进程（npm / shell），真正干活的在它下面挂着的子进程里。`
+        : `<b>${esc(progName(sel))}</b> 正在跑，它一调模型或抓数据，这里就会出现。也可以先点右上角「停在下一次模型调用」把它拦下来。`;
+    $('addProject2').hidden = true;
+    return;
+  }
   const running = knownProjects.some((p) => p.proc?.running);
   const has = knownProjects.length > 0;
   $('emptyTitle').textContent = !has
@@ -688,30 +723,69 @@ function inRun(runId, sel) {
   return !!r && (r.parent_run_id === sel || r.group_id === sel);
 }
 
+/** 会话栏收起 / 展开，记在本机浏览器里（窄屏默认收起） */
+function initRailToggle() {
+  let closed = window.innerWidth < 900;
+  try {
+    const v = localStorage.getItem('am.railClosed');
+    if (v != null) closed = v === '1';
+  } catch { /* 隐私模式之类读不了，用缺省 */ }
+  document.body.classList.toggle('railClosed', closed);
+  $('railToggle').onclick = () => {
+    const now = !document.body.classList.contains('railClosed');
+    document.body.classList.toggle('railClosed', now);
+    try { localStorage.setItem('am.railClosed', now ? '1' : '0'); } catch { /* 同上 */ }
+  };
+}
+
+/** 这个运行（含它处理过的请求）自己有没有调用 —— 没有的就是 npm / shell 之类的包装进程 */
+function hasOwnCalls(runId) {
+  if (runs.get(runId)?.call_count > 0) return true; // 历史运行：服务端算好的调用数（含它处理过的请求）
+  for (const c of calls.values()) {
+    if (c.run_id === runId || runs.get(c.run_id)?.parent_run_id === runId) return true;
+  }
+  return false;
+}
+
+/** 列表里挂在谁下面：请求挂进程，子进程挂拉起它的运行；挂靠对象不在列表里就自己顶格 */
+const holderOf = (r) =>
+  r.parent_run_id && runs.has(r.parent_run_id) ? r.parent_run_id
+  : r.spawned_by && runs.has(r.spawned_by) ? r.spawned_by
+  : null;
+
 function renderRunPicker() {
   const sel = $('runPicker');
   const all = [...runs.values()].sort((a, b) => b.started_at - a.started_at);
-  // 请求级运行缩进挂在它的进程下面（进程不在列表里的就单独列）
+  // 请求级运行缩进挂在它的进程下面，被拉起的子进程挂在拉起它的运行下面 —— 不再各自顶到最上面
   const kids = new Map();
-  for (const r of all) if (r.parent_run_id && runs.has(r.parent_run_id)) {
-    kids.set(r.parent_run_id, [...(kids.get(r.parent_run_id) ?? []), r]);
+  for (const r of all) {
+    const h = holderOf(r);
+    if (h) kids.set(h, [...(kids.get(h) ?? []), r]);
   }
   const opts = [];
-  for (const r of all) {
-    if (r.parent_run_id && runs.has(r.parent_run_id)) continue;
+  const seen = new Set();
+  const add = (r, depth) => {
+    if (seen.has(r.run_id)) return; // 防环：坏数据也不能让页面卡死
+    seen.add(r.run_id);
     const ks = kids.get(r.run_id) ?? [];
-    opts.push(`<option value="${esc(r.run_id)}">${esc(shortRun(r, ks.length))}</option>`);
-    for (const k of ks) opts.push(`<option value="${esc(k.run_id)}">　↳ ${esc(shortRun(k))}</option>`);
-  }
+    const mark = depth ? `${'　'.repeat(depth)}${r.kind === 'request' ? '↳' : '⤷'} ` : '';
+    opts.push(`<option value="${esc(r.run_id)}">${esc(mark + shortRun(r, ks))}</option>`);
+    for (const k of ks) add(k, depth + 1);
+  };
+  for (const r of all) if (!holderOf(r)) add(r, 0);
+  for (const r of all) add(r, 0); // 万一有环里的运行没被挂上，兜底列出来
   sel.innerHTML = `<option value="">全部运行 (${all.length})</option>` + opts.join('');
   sel.value = currentRun ?? '';
 }
 
-function shortRun(r, nKids = 0) {
+function shortRun(r, kids = []) {
   const t = new Date(r.started_at).toLocaleTimeString('zh-CN', { hour12: false });
+  const nReq = kids.filter((k) => k.kind === 'request').length;
+  const nProc = kids.length - nReq;
+  const counts = [nReq ? `${nReq} 个请求` : '', nProc ? `${nProc} 个子进程` : ''].filter(Boolean).join(' · ');
   const what = r.kind === 'request'
     ? `${r.trigger || '请求'}${r.http_status ? ` → ${r.http_status}` : ''}`
-    : `${(r.cwd || '').split('/').pop() || String(r.run_id).slice(0, 12)}${nKids ? `（${nKids} 个请求）` : ''}`;
+    : `${progName(r)}${counts ? `（${counts}）` : ''}`;
   return `${t}  ${what}${r.replay_of ? '  · 重放' : ''}`;
 }
 
@@ -1016,13 +1090,21 @@ async function boot() {
   initAttach(health);
 
   // 先补历史，再接实时流
-  const history = await fetch('/api/runs').then((r) => r.json());
+  // 运行本身很轻（一行一个），多拿一些；只拿 50 条时，常驻服务的请求级运行一多，进程和它的请求就对不上了
+  const history = await fetch('/api/runs?limit=2000').then((r) => r.json());
   for (const r of history) runs.set(r.run_id, r);
   // 默认聚焦最近一次运行 —— 「全部运行」会把互不相干的进程画进同一张图，
   // 对监视屏来说没有意义。要横向对比时再手动切到全部。
-  currentRun = history[0]?.run_id ?? null;
-  renderRunPicker();
   for (const c of await fetch('/api/calls').then((r) => r.json())) calls.set(c.call_id, c);
+  // 默认打开最近一次真正干过活的（历史里的第一条）—— 不是最新冒出来的空进程或子进程
+  initHistory({ select: selectRun, current: () => currentRun });
+  currentRun = (await loadHistory())
+    ?? history.find((r) => !r.spawned_by || !runs.has(r.spawned_by) || !hasOwnCalls(r.spawned_by))?.run_id
+    ?? history[0]?.run_id ?? null;
+  renderHistory();
+  initRailToggle();
+  renderRunPicker();
+  await loadRunCalls(currentRun);
   renderList();
   await loadGraph();
 

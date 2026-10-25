@@ -16,9 +16,10 @@ import { requestHash } from '../shared/hash.ts';
 import { captureFrames } from '../shared/stack.ts';
 import type { AgentEvent, Frame, LLMRequestIR, LLMResponseIR } from '../shared/types.ts';
 import { gate } from './gate.ts';
+import { installChildren, spawnedBy } from './children.ts';
 import { initLoops, installLoopHooks } from './loops.ts';
 import { baselineRunId, lookup as replayLookup } from './replay.ts';
-import { currentRunId, endOpenRequestRuns, initRequestRuns, installRequestScopes } from './requests.ts';
+import { currentRunId, endOpenRequestRuns, initRequestRuns, installRequestScopes, peekRunId } from './requests.ts';
 import { installNodeHttp } from './nodehttp.ts';
 import { drain, emit, endpoint, httpArmedAsync, primeHttpArmed, setRawFetch } from './transport.ts';
 
@@ -79,7 +80,10 @@ export function install(): void {
   initLoops(currentRunId, () => seq++);
   installLoopHooks();    // 循环插桩注入的代码通过 globalThis 调这些钩子
 
-  sendFor(runId, { type: 'run.started', kind: 'process', ...runStartedFields() });
+  // 被另一个带探针的进程拉起的（agent 用 bash 跑了 npm test 之类）：告诉服务端父运行是谁，
+  // 让它挂在父运行下面，不要顶到列表最上面
+  sendFor(runId, { type: 'run.started', kind: 'process', ...runStartedFields(), ...(spawnedBy ? { spawnedBy } : {}) });
+  installChildren(runId, peekRunId);
 
   initRequestRuns(runId, {
     // 回归重发的请求带着它对应的基线请求 —— 比进程级的 AGENTMAKE_REPLAY 精确，对比时一对一
@@ -568,6 +572,10 @@ async function finishStreaming(ctx: CallContext, copy: Response, started: number
   } catch {
     response = null;
   }
+  // 结束信号（stop_reason / finish_reason）已经收到，回答就是完整的。之后的「中止」是调用方
+  // 读完就 abort 了自己的 signal 做收尾（dsh 就这样）—— 我们读的是 tee 出来的副本，
+  // 慢它一步就会撞上这个中止。不能把它记成「流在中途断了」，否则每次调用都被判失败。
+  if (error && response?.finishReason) error = null;
   send({
     type: 'llm.after',
     callId: ctx.callId,

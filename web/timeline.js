@@ -69,7 +69,7 @@ function paint() {
       const from = Math.max(c.started_at, t0);
       const w = Math.max(0.4, ((end - from) / span) * 100);
       const cls = [
-        'seg', c.kind === 'llm' ? 'llm' : 'tool',
+        'tlseg', c.kind === 'llm' ? 'llm' : 'tool',
         isPending(c) ? 'run' : '',
         c.ok === 0 || c.error ? 'bad' : '',
         c.failing ? 'flag' : '',

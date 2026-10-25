@@ -7,6 +7,8 @@
 //   [4] Python：aiohttp（普通 / 读流 / 工具）+ 官方 openai SDK 的流式（以前完全看不见）—— 需要装了依赖的解释器
 //   [5] Python：urllib / requests 拿到的二进制响应和不带探针一模一样（以前按 UTF-8 解码再编码，字节被改坏）
 //   [6] fetch(new Request(url, {body}))：prompt 记得下来、断点改写生效
+//   [7] 读完流式回答立刻 abort 自己的 signal（dsh 的收尾方式）：回答完整，不被误判成失败
+//   [8] 子进程：记着是谁拉起的、挂在父运行（或那次请求）下面、归进同一组；AGENTMAKE_CHILDREN=0 时子进程不带探针
 
 import { spawn, spawnSync } from 'node:child_process';
 
@@ -156,6 +158,45 @@ console.log('\n[6] fetch(Request)：请求体在 Request 对象上');
   const last6 = await j(`${MOCK}/__last`);
   ok(r6b.out.includes('request-obj-done') && last6.messages[0].content === '断点里改过的（Request 形态）',
     '★ 断点改写在 Request 形态上也真的生效（以前会被原对象里的 body 盖回去或静默失败）');
+}
+
+// ── 7 ──
+console.log('\n[7] 读完流就 abort 自己的 signal（dsh 的写法）');
+{
+  const r7 = await node('stream-abort-agent.mjs');
+  const c7 = (await callsOf(r7.runId)).find((c) => c.kind === 'llm');
+  ok(r7.out.includes('stream-abort-done') && c7 && !c7.error && !c7.failing && (c7.response_text ?? '').includes('流式回答'),
+    `★ 回答完整、不算失败（以前记成「流在中途断了」，dsh 的每次调用都被判失败）${c7?.error ? `：${c7.error}` : ''}`);
+}
+
+// ── 8 ──
+console.log('\n[8] 子进程：挂在父运行下面 · AGENTMAKE_CHILDREN=0 关掉继承');
+{
+  const allRuns = () => j(`${AM}/api/runs?limit=2000`);
+  const before = new Set((await allRuns()).map((r) => r.run_id));
+  const py3 = process.env.AGENTMAKE_PY_DEPS || 'python3';
+  const r8 = await node('spawn-agent.mjs', { PYTHONPATH: pyHarness, AGENTMAKE_PY_DEPS: py3 });
+  await sleep(500);
+  const fresh = (await allRuns()).filter((r) => !before.has(r.run_id));
+  const parent = fresh.find((r) => r.kind === 'process' && String(r.argv).includes('spawn-agent.mjs'));
+  const reqRun = fresh.find((r) => r.kind === 'request' && r.parent_run_id === parent?.run_id);
+  const kids = fresh.filter((r) => r.spawned_by);
+  const byArg = (a) => kids.find((r) => String(r.argv).includes(a));
+  ok(r8.out.includes('spawn-agent-done') && parent && !parent.spawned_by, `父进程正常跑完、自己不是谁的子进程${r8.out.includes('spawn-agent-done') ? '' : `\n${r8.out.slice(-600)}`}`);
+  ok(byArg('exec-child')?.spawned_by === parent?.run_id, '★ execFile 拉起的 node 子进程记着是谁拉起的它');
+  ok(kids.some((r) => String(r.argv).includes('-c') && r.run_id.startsWith('run_py') && r.spawned_by === parent?.run_id), '★ spawnSync 拉起的 python 子进程也挂在父运行下面');
+  ok(!!reqRun && byArg('request-child')?.spawned_by === reqRun.run_id, '★ 处理请求时拉起的子进程记到那次请求上（dsh 某一轮对话里跑的命令）');
+  ok(kids.length === 4 && kids.every((k) => k.group_id === parent?.group_id), `子进程都归进父运行的组（${kids.length} 个）`);
+  ok(kids.filter((k) => !String(k.argv).includes('noop-child')).every((k) => k.call_count >= 1), '子进程的模型调用照样记下来了');
+  ok(!fresh.some((r) => r.trigger === 'POST /noop') && byArg('noop-child')?.spawned_by === parent?.run_id,
+    '★ 没调过模型的请求里拉起子进程：不冒出空的请求级运行，子进程记到进程上'); 
+
+  const before2 = new Set((await allRuns()).map((r) => r.run_id));
+  const r8b = await node('spawn-agent.mjs', { PYTHONPATH: pyHarness, AGENTMAKE_PY_DEPS: py3, AGENTMAKE_CHILDREN: '0' });
+  await sleep(500);
+  const fresh2 = (await allRuns()).filter((r) => !before2.has(r.run_id));
+  ok(r8b.out.includes('spawn-agent-done') && fresh2.length >= 1 && !fresh2.some((r) => r.spawned_by) && fresh2.every((r) => !String(r.argv).includes('-child')),
+    `★ AGENTMAKE_CHILDREN=0：只有父进程被记录，子进程一个都没报（新运行 ${fresh2.length} 个，都是父进程自己的）`);
 }
 
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

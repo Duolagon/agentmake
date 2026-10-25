@@ -112,6 +112,9 @@ export type RunStarted = EventBase & {
   trigger?: string;
   /** 这次运行以谁为重放基线（AGENTMAKE_REPLAY 的值：一个运行或一个运行组） */
   replayOf?: string;
+  /** 拉起这个进程的运行（另一个带探针的进程，经 AGENTMAKE_SPAWNED_BY 传下来）。
+      有它的运行挂在父运行下面显示，归入父运行的组 */
+  spawnedBy?: string;
 };
 
 export type RunEnded = EventBase & {
