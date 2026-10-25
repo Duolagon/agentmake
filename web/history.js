@@ -8,7 +8,7 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-let state = { entries: [], hiddenEmpty: 0 };
+let state = { batches: [], entries: [], hiddenEmpty: 0 };
 let filter = 'all'; // all | bad | live
 let query = '';
 let ctx = { select: () => {}, current: () => null };
@@ -41,6 +41,16 @@ export function initHistory(c) {
     };
   }
   $('hrList').onclick = (e) => {
+    const tg = e.target.closest('[data-toggle]');
+    if (tg) {
+      const id = tg.dataset.toggle;
+      opened ??= new Set();
+      if (opened.has(id)) opened.delete(id);
+      else opened.add(id);
+      return renderHistory();
+    }
+    const sc = e.target.closest('[data-scope]');
+    if (sc) return ctx.select(sc.dataset.scope);
     const kid = e.target.closest('[data-kid]');
     if (kid) return ctx.select(kid.dataset.kid);
     const row = e.target.closest('[data-run]');
@@ -73,28 +83,27 @@ export function renderHistory() {
   const list = $('hrList');
   if (!list) return;
   const cur = ctx.current();
-  const shown = state.entries.filter((e) =>
+  const keep = (e) =>
     filter === 'bad' ? e.status === 'failed' || e.errors || e.failing
     : filter === 'live' ? e.status === 'running'
-    : true);
+    : true;
+  const batches = (state.batches ?? [])
+    .map((b) => ({ ...b, shown: b.entries.filter(keep) }))
+    .filter((b) => b.shown.length);
 
-  if (!shown.length) {
+  if (!batches.length) {
     list.innerHTML = `<div class="hr-empty">${
       query ? '没有匹配的记录' : filter === 'live' ? '现在没有在跑的' : filter === 'bad' ? '没有出过问题的记录' : '还没有记录。挂上探针跑一次 agent，这里就会出现。'
     }</div>`;
   } else {
-    let day = '';
-    const out = [];
-    for (const e of shown) {
-      const d = dayLabel(e.startedAt);
-      if (d !== day) {
-        day = d;
-        out.push(`<div class="hr-day">${esc(d)}</div>`);
-      }
-      out.push(entryHtml(e, e.runId === cur));
-    }
-    list.innerHTML = out.join('');
-    list.querySelector('.hr-item.on')?.scrollIntoView({ block: 'nearest' });
+    // 缺省展开：最新的一批 + 正在看的那一批。搜索 / 筛选时命中的都展开，不然搜到了也看不见
+    const holding = cur ? batches.find((b) => b.entries.some((e) => e.runId === cur) || b.scope === cur) : undefined;
+    if (!opened) opened = new Set([batches[0].id, holding?.id].filter(Boolean));
+    else if (holding && autoOpenFor !== cur) opened.add(holding.id);
+    autoOpenFor = cur;
+    const forceOpen = !!query.trim() || filter !== 'all';
+    list.innerHTML = batches.map((b) => batchHtml(b, forceOpen || opened.has(b.id), cur)).join('');
+    list.querySelector('.hr-item.on, .hb.cur > .hb-head')?.scrollIntoView({ block: 'nearest' });
   }
   const hidden = state.hiddenEmpty;
   $('hrFoot').innerHTML =
@@ -102,26 +111,57 @@ export function renderHistory() {
     `<button class="hr-all${cur ? '' : ' on'}" data-all>全部运行混在一起看</button>`;
 }
 
+/** 哪几批是展开的。null = 还没决定过（第一次渲染时按缺省规则定） */
+let opened = null;
+let autoOpenFor;
+
+const STATUS_TIP = { running: '正在跑', done: '完成', failed: '有失败', interrupted: '没跑完进程就停了' };
+const CARET = '<svg class="hb-caret" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 6.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function batchHtml(b, open, cur) {
+  const unit = b.kind === 'service' ? '轮对话' : '次运行';
+  const span = b.endedAt && b.endedAt - b.startedAt > 60_000 ? ` – ${time(b.endedAt)}` : '';
+  const meta = [
+    `${dayLabel(b.startedAt)} ${time(b.startedAt)}${span}`,
+    b.entries.length > 1 ? `${b.entries.length} ${unit}` : '',
+    `${b.llm} 次模型`,
+    b.tokens ? tokens(b.tokens) : '',
+  ].filter(Boolean).join(' · ');
+  const isCur = !!cur && b.scope === cur;
+  return `<div class="hb${open ? ' open' : ''}${isCur ? ' cur' : ''}">
+    <button class="hb-head" data-toggle="${esc(b.id)}" aria-expanded="${open}">
+      ${CARET}
+      <span class="hr-dot ${b.status}" title="${STATUS_TIP[b.status]}"></span>
+      <span class="hb-main">
+        <span class="hb-title">${esc(b.title)}</span>
+        <span class="hb-meta">${esc(meta)}${b.bad ? ` · <b class="hr-bad">${b.bad} 次失败</b>` : ''}</span>
+      </span>
+      ${b.shown.length > 1 ? `<span class="hb-count">${b.shown.length}</span>` : ''}
+    </button>
+    ${open ? `<div class="hb-body">
+      ${b.shown.map((e) => entryHtml(e, e.runId === cur)).join('')}
+      ${b.scope && b.entries.length > 1 ? `<button class="hb-scope${isCur ? ' on' : ''}" data-scope="${esc(b.scope)}">整批放在一起看</button>` : ''}
+    </div>` : ''}
+  </div>`;
+}
+
 function entryHtml(e, on) {
   const title = e.task || e.trigger || e.program;
-  const prog = e.program.split(' · ')[0];
   const bad = e.errors + e.failing;
   const meta = [
     time(e.startedAt),
-    prog,
     `${e.llm} 次模型${e.tool ? ` · ${e.tool} 次工具` : ''}`,
     e.tokens ? tokens(e.tokens) : '',
     dur(e),
   ].filter(Boolean).join(' · ');
-  const statusTip = { running: '正在跑', done: '完成', failed: '有失败', interrupted: '没跑完进程就停了' }[e.status];
   const kids = on && e.children.length
     ? `<div class="hr-kids">${e.children.slice(0, 30).map((k) =>
         `<button class="hr-kid" data-kid="${esc(k.runId)}">⤷ ${esc(k.program.split(' · ')[0])}<span>${k.calls ? `${k.calls} 次调用` : '没有调用'}</span></button>`).join('')}${
         e.children.length > 30 ? `<div class="hr-more">还有 ${e.children.length - 30} 个</div>` : ''}</div>`
     : '';
   return `<div class="hr-item${on ? ' on' : ''}" data-run="${esc(e.runId)}" title="${esc(e.task || '')}">
-    <div class="hr-title">${esc(title)}</div>
-    <div class="hr-meta"><span class="hr-dot ${e.status}" title="${statusTip}"></span>${esc(meta)}${
+    <div class="hr-title"><span class="hr-dot ${e.status}" title="${STATUS_TIP[e.status]}"></span>${esc(title)}</div>
+    <div class="hr-meta">${esc(meta)}${
       bad ? ` · <b class="hr-bad">${bad} 次失败</b>` : ''}${e.replayOf ? ' · 重放' : ''}${
       e.children.length && !on ? ` · 拉起 ${e.children.length} 个子进程` : ''}</div>
     ${kids}

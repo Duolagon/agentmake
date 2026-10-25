@@ -20,6 +20,7 @@ export type HistoryRun = {
   kind: string | null;
   parent_run_id: string | null;
   spawned_by: string | null;
+  group_id?: string | null;
   trigger: string | null;
   cwd: string | null;
   argv: string | null;
@@ -42,6 +43,8 @@ export type RunStats = {
 };
 
 export type HistoryEntry = {
+  /** 归到哪一批（见 HistoryBatch） */
+  batchKey: string;
   runId: string;
   kind: 'process' | 'request';
   /** 哪个程序：dsh web · deepseekhsh */
@@ -65,11 +68,38 @@ export type HistoryEntry = {
   children: { runId: string; program: string; calls: number }[];
 };
 
+/**
+ * 一批：左栏的第一层，收起时一行就能看出「这一批干了什么、有没有问题」。
+ *   service = 一次服务启动（dsh web 起来一次），下面是这次启动期间的每一轮对话
+ *   group   = 显式分的组（AGENTMAKE_GROUP，比如一轮回归）
+ *   session = 其余一次性脚本：同一目录里前后相隔不到 10 分钟的连续几次（反复改反复跑）
+ */
+export type HistoryBatch = {
+  id: string;
+  kind: 'service' | 'group' | 'session';
+  title: string;
+  /** 整批一起看时选哪个范围（服务 = 进程运行，组 = 组名）；session 没有 */
+  scope: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  status: HistoryEntry['status'];
+  llm: number;
+  tool: number;
+  tokens: number;
+  bad: number;
+  entries: HistoryEntry[];
+};
+
 export type History = {
+  batches: HistoryBatch[];
+  /** 平铺的全部条目（新到旧）—— 默认选中「最近一次干过活的」用 */
   entries: HistoryEntry[];
   /** 没列出来的：一次模型都没调过的运行个数 */
   hiddenEmpty: number;
 };
+
+/** 同一目录里两次运行相隔多久以内算同一批 */
+const SESSION_GAP_MS = 10 * 60 * 1000;
 
 const EMPTY: RunStats = { llm: 0, tool: 0, tokensIn: 0, tokensOut: 0, errors: 0, pending: 0, firstAt: null, lastAt: null, models: null };
 
@@ -84,7 +114,7 @@ export function programName(r: { argv: string | null; cwd: string | null; run_id
   const a0 = a[0] ? a[0].split('/').pop()! : '';
   const a1 = a[1] && !a[1].startsWith('-') && !a[1].includes('/') ? ` ${a[1]}` : '';
   const dir = (r.cwd ?? '').split('/').pop() ?? '';
-  if (!a0) return dir || r.run_id;
+  if (!a0) return dir || '没记下程序名'; // 很早的记录没存 argv / cwd —— 给 run id 的话每条都不一样，批次也收不拢
   return `${a0}${a1}${dir ? ` · ${dir}` : ''}`;
 }
 
@@ -197,6 +227,7 @@ export function buildHistory(input: {
       : s.errors || fail ? 'failed' : 'done';
     const parent = r.kind === 'request' && r.parent_run_id ? byId.get(r.parent_run_id) : undefined;
     entries.push({
+      batchKey: batchKeyOf(r),
       runId: r.run_id,
       kind: r.kind === 'request' ? 'request' : 'process',
       program: programName(parent ?? r),
@@ -220,8 +251,65 @@ export function buildHistory(input: {
   const q = input.q?.trim().toLowerCase();
   const hit = (e: HistoryEntry) => !q || [e.task, e.program, e.trigger, e.runId, ...e.models]
     .some((x) => x && x.toLowerCase().includes(q));
-  return {
-    entries: entries.filter(hit).sort((a, b) => b.startedAt - a.startedAt).slice(0, input.limit ?? 300),
-    hiddenEmpty,
-  };
+  const shown = entries.filter(hit).sort((a, b) => b.startedAt - a.startedAt).slice(0, input.limit ?? 300);
+  return { batches: toBatches(shown, byId), entries: shown, hiddenEmpty };
+
+  /** 这一条属于哪一批（session 批要按时间再切，先只给目录） */
+  function batchKeyOf(r: HistoryRun): string {
+    const proc = r.kind === 'request' && r.parent_run_id ? byId.get(r.parent_run_id) : undefined;
+    const g = r.group_id ?? proc?.group_id ?? null;
+    // 显式的组名不是任何一个运行的 id（缺省时组就是进程自己）
+    if (g && !byId.has(g)) return `group:${g}`;
+    if (proc) return `service:${proc.run_id}`;
+    return `session:${r.cwd ?? ''}`;
+  }
+}
+
+function toBatches(entries: HistoryEntry[], byId: Map<string, HistoryRun>): HistoryBatch[] {
+  const batches: HistoryBatch[] = [];
+  const open = new Map<string, HistoryBatch>();
+  // 从旧到新走：session 批按「和这一批最早那次相隔不到 10 分钟」往前接
+  for (const e of [...entries].sort((a, b) => a.startedAt - b.startedAt)) {
+    let b = open.get(e.batchKey);
+    if (b && e.batchKey.startsWith('session:') && e.startedAt - (b.endedAt ?? b.startedAt) > SESSION_GAP_MS) b = undefined;
+    if (!b) {
+      const [kind, ...rest] = e.batchKey.split(':');
+      const key = rest.join(':');
+      const proc = kind === 'service' ? byId.get(key) : undefined;
+      b = {
+        id: `${e.batchKey}@${e.startedAt}`,
+        kind: kind as HistoryBatch['kind'],
+        title: kind === 'group' ? key : proc ? programName(proc) : e.program,
+        scope: kind === 'service' ? key : kind === 'group' ? key : null,
+        startedAt: proc?.started_at ?? e.startedAt,
+        endedAt: null,
+        status: 'done',
+        llm: 0, tool: 0, tokens: 0, bad: 0,
+        entries: [],
+      };
+      open.set(e.batchKey, b);
+      batches.push(b);
+    }
+    b.entries.push(e);
+    b.endedAt = Math.max(b.endedAt ?? 0, e.endedAt ?? e.startedAt);
+    b.llm += e.llm;
+    b.tool += e.tool;
+    b.tokens += e.tokens;
+    b.bad += e.errors + e.failing;
+  }
+  const rank = { running: 3, interrupted: 2, failed: 1, done: 0 } as const;
+  for (const b of batches) {
+    b.entries.sort((x, y) => y.startedAt - x.startedAt);
+    // 一批里程序都一样就用程序名，不一样就说「目录 · N 个程序」
+    if (b.kind === 'session') {
+      const progs = new Set(b.entries.map((e) => e.program));
+      if (progs.size > 1) {
+        const dir = b.entries[0].program.split(' · ')[1] ?? '';
+        b.title = `${dir || '同一目录'} · ${progs.size} 个程序`;
+      }
+    }
+    b.status = b.entries.reduce<HistoryEntry['status']>((s, e) => (rank[e.status] > rank[s] ? e.status : s), 'done');
+    if (b.status === 'done' && b.bad) b.status = 'failed';
+  }
+  return batches.sort((a, b) => (b.entries[0]?.startedAt ?? 0) - (a.entries[0]?.startedAt ?? 0));
 }

@@ -91,7 +91,35 @@ body.railClosed #historyRail { display: none; }
 .hr-f:hover { color: var(--text); }
 .hr-f.on { background: var(--bg); border-color: var(--border); color: var(--text); font-weight: 600; }
 .hr-list { flex: 1; overflow-y: auto; padding: 4px 6px 10px; min-height: 0; }
-.hr-day { font-size: 11px; color: var(--text-dim); padding: 12px 8px 4px; letter-spacing: .02em; }
+/* 批次：第一层。收起时一行看清「这一批是什么、什么时候、多少、有没有问题」 */
+.hb { margin-top: 2px; }
+.hb-head {
+  appearance: none; width: 100%; display: flex; align-items: flex-start; gap: 6px; text-align: left;
+  font: inherit; color: var(--text); background: transparent; border: 0; border-radius: 7px;
+  padding: 7px 8px 7px 6px; cursor: pointer;
+}
+.hb-head:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+.hb.cur > .hb-head { background: var(--bg-raised); box-shadow: 0 0 0 1px var(--border); }
+.hb-caret { flex: none; margin-top: 4px; color: var(--text-dim); transition: transform .12s ease; }
+.hb.open .hb-caret { transform: rotate(90deg); }
+.hb-head .hr-dot { margin: 5px 0 0; flex: none; }
+.hb-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.hb-title { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hb-meta { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+.hb-count {
+  flex: none; margin-top: 1px; font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums;
+  padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg);
+}
+/* 展开后的这一批：左边一条竖线把它们串起来，一眼看出属于谁 */
+.hb-body { margin: 2px 0 6px 13px; padding-left: 8px; border-left: 1px solid var(--border); display: grid; gap: 1px; }
+.hb-body .hr-item { padding: 6px 8px; }
+.hb-body .hr-title { -webkit-line-clamp: 2; }
+.hb-body .hr-title .hr-dot { margin-right: 6px; vertical-align: 1px; }
+.hb-scope {
+  appearance: none; justify-self: start; font: inherit; font-size: 11px; color: var(--text-dim); cursor: pointer;
+  background: transparent; border: 0; padding: 3px 8px; text-decoration: underline; text-underline-offset: 2px;
+}
+.hb-scope:hover, .hb-scope.on { color: var(--text); }
 .hr-item { padding: 8px 9px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
 .hr-item:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
 .hr-item.on { background: var(--bg-raised); border-color: var(--border); box-shadow: 0 1px 2px rgb(0 0 0 / .05); }

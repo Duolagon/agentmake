@@ -723,7 +723,7 @@ export class Store {
     tasks: Map<string, string | null>;
   } {
     const runs = this.db
-      .prepare(`SELECT run_id, kind, parent_run_id, spawned_by, trigger, cwd, argv, pid, started_at, ended_at, replay_of
+      .prepare(`SELECT run_id, kind, parent_run_id, spawned_by, group_id, trigger, cwd, argv, pid, started_at, ended_at, replay_of
                 FROM runs ORDER BY started_at DESC LIMIT ?`)
       .all(maxRuns) as HistoryRun[];
     const stats = new Map<string, RunStats>();

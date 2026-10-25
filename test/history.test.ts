@@ -102,4 +102,38 @@ test('程序名：程序 + 子命令 + 目录；没有 argv 时退到目录名',
   assert.equal(programName({ argv: JSON.stringify(['/opt/homebrew/bin/dsh', 'web', '--port', '3081']), cwd: '/Users/x/deepseekhsh', run_id: 'r' }), 'dsh web · deepseekhsh');
   assert.equal(programName({ argv: JSON.stringify(['/a/b/agent.py']), cwd: '/w/proj', run_id: 'r' }), 'agent.py · proj');
   assert.equal(programName({ argv: '[]', cwd: '/w/proj', run_id: 'r' }), 'proj');
+  assert.equal(programName({ argv: null, cwd: null, run_id: 'run_x' }), '没记下程序名', '不拿 run id 充数：每条都不一样，批次就收不拢了');
+});
+
+// ── 按批次收拢 ──
+
+test('★ 批次：一次服务启动的几轮对话是一批；同一目录连续跑的脚本是一批；隔了 10 分钟以上另起一批', () => {
+  const M = 60_000;
+  const runs = [
+    run('dsh', { argv: JSON.stringify(['/opt/homebrew/bin/dsh', 'web']), cwd: '/u/deepseekhsh', started_at: 0, ended_at: null }),
+    run('dsh_r1', { kind: 'request', parent_run_id: 'dsh', started_at: 1 * M }),
+    run('dsh_r2', { kind: 'request', parent_run_id: 'dsh', started_at: 30 * M }),
+    run('s1', { cwd: '/w/sum', argv: JSON.stringify(['/w/sum/sum.mjs']), started_at: 2 * M }),
+    run('s2', { cwd: '/w/sum', argv: JSON.stringify(['/w/sum/sum.mjs']), started_at: 5 * M }),
+    run('s3', { cwd: '/w/sum', argv: JSON.stringify(['/w/sum/sum.mjs']), started_at: 40 * M }),
+  ];
+  const st = (t: number) => stat(1, { firstAt: t * M, lastAt: t * M + 1000 });
+  const h = hist(runs, { dsh_r1: st(1), dsh_r2: st(30), s1: st(2), s2: st(5), s3: st(40) });
+  const shape = h.batches.map((b) => [b.kind, b.title, b.entries.map((e) => e.runId)]);
+  assert.deepEqual(shape, [
+    ['session', 'sum.mjs · sum', ['s3']],
+    ['service', 'dsh web · deepseekhsh', ['dsh_r2', 'dsh_r1']],
+    ['session', 'sum.mjs · sum', ['s2', 's1']],
+  ], '新的批在上；服务的两轮隔了半小时也是同一次启动');
+  assert.equal(h.batches[1].scope, 'dsh', '整批看 = 看那次启动的进程');
+});
+
+test('批次：显式分组（AGENTMAKE_GROUP）单独一批；批的状态取最要紧的那条', () => {
+  const runs = [run('a', { group_id: 'regress-7' }), run('b', { group_id: 'regress-7' })];
+  const h = hist(runs, { a: stat(1), b: stat(1, { errors: 2 }) });
+  assert.equal(h.batches.length, 1);
+  assert.equal(h.batches[0].kind, 'group');
+  assert.equal(h.batches[0].title, 'regress-7');
+  assert.equal(h.batches[0].status, 'failed');
+  assert.equal(h.batches[0].bad, 2);
 });
