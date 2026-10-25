@@ -13,7 +13,7 @@ import { initVerify, loadVerify, noteRegress, progName } from './verify.js';
 import { initSpec, loadSpec, flowAnnotations } from './spec.js';
 import { initProjects, noteProcEvent } from './projects.js';
 import { initHistory, loadHistory, renderHistory, scheduleHistory } from './history.js';
-import { initTranscript, refreshTranscript, showTranscript } from './transcript.js';
+import { focusCall, initTranscript, refreshTranscript, showTranscript } from './transcript.js';
 import { initTiming, loadTiming, markTiming, refreshTiming } from './timing.js';
 
 const $ = (id) => document.getElementById(id);
@@ -714,7 +714,7 @@ function renderList() {
   const ul = $('calls');
   const atBottom = ul.scrollTop + ul.clientHeight >= ul.scrollHeight - 40;
   ul.innerHTML = list.map(rowHtml).join('');
-  for (const li of ul.children) li.onclick = () => showDetail(li.dataset.id);
+  for (const li of ul.children) li.onclick = () => jumpToCall(li.dataset.id);
   if ($('follow').checked && atBottom) ul.scrollTop = ul.scrollHeight;
   if (alertFilter) {
     $('filterTag').hidden = false;
@@ -772,6 +772,21 @@ function initRailToggle() {
     document.body.classList.toggle('railClosed', now);
     try { localStorage.setItem('am.railClosed', now ? '1' : '0'); } catch { /* 同上 */ }
   };
+}
+
+/**
+ * 点了某一次调用（时间线的色块、时序的一行、调用列表的一条）：右栏在完整记录里跳到那一轮，
+ * 各处一起高亮这次调用。要看原始 prompt / 请求，再点那一轮标题上的「完整 prompt ›」
+ */
+async function jumpToCall(callId) {
+  selectedCall = callId;
+  renderList();
+  markTiming(callId);
+  if (view === 'verify') return showDetail(callId); // 验证视图的右栏是改前改后对比，不动它
+  const c = calls.get(callId);
+  // 这次调用属于哪次运行：在看「全部运行」时也能跳到它自己那次的记录里
+  const runId = currentRun ?? c?.run_id ?? null;
+  if (!(await focusCall(runId, callId))) showDetail(callId);
 }
 
 /** 这个运行（含它处理过的请求）自己有没有调用 —— 没有的就是 npm / shell 之类的包装进程 */
@@ -1140,7 +1155,7 @@ async function boot() {
   initGraph($('canvas'), applyNodeFilter);
   initFlow({ pickCall: showDetail, pickStep: applyStepFilter });
   initAlerts({ pick: onAlert });
-  initTimeline({ pickCall: showDetail, pickRun: selectRun, data: timelineData });
+  initTimeline({ pickCall: jumpToCall, pickRun: selectRun, data: timelineData, selected: () => selectedCall });
   initCompare({ pickCall: showDetail });
   initVerify({ showDiff, showCall: showDetail, runs: () => runs });
   initSpec({ changed: () => loadGraph() });
@@ -1165,7 +1180,7 @@ async function boot() {
   initRailToggle();
   renderRunPicker();
   initTranscript({ openCall: showDetail, current: () => currentRun });
-  initTiming({ openCall: showDetail, current: () => currentRun, selected: () => selectedCall });
+  initTiming({ openCall: jumpToCall, current: () => currentRun, selected: () => selectedCall });
   showTranscript(currentRun); // 右栏默认就是完整记录，不再空着等人点
   await loadRunCalls(currentRun);
   renderList();

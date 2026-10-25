@@ -25,6 +25,7 @@ export const transcriptShown = () => !!$('detailPane')?.querySelector('.tr');
 /** 显示一次运行的完整记录。runId 为空（「全部运行」）时给一句提示 */
 export async function showTranscript(runId) {
   const pane = $('detailPane');
+  if (shownFor !== runId) focused = null;
   if (!runId) {
     shownFor = null;
     pane.innerHTML = `<div class="placeholder"><p class="bigline">选一次运行看它的完整记录</p>
@@ -44,6 +45,7 @@ export async function showTranscript(runId) {
   const open = new Set([...box.querySelectorAll('details[open][data-k]')].map((d) => d.dataset.k));
   box.innerHTML = t && !t.error ? render(t) : `<div class="tr-loading">${esc(t?.error ?? '取不到记录')}</div>`;
   for (const d of box.querySelectorAll('details[data-k]')) if (open.has(d.dataset.k)) d.open = true;
+  if (focused) box.querySelector(`[data-call="${CSS.escape(focused)}"]`)?.closest('.tr-round')?.classList.add('cur');
   box.onclick = (e) => {
     const go = e.target.closest('[data-call]');
     if (go && !e.target.closest('summary, details > :not(summary)')) ctx.openCall(go.dataset.call);
@@ -51,6 +53,33 @@ export async function showTranscript(runId) {
   if (first) pane.scrollTop = 0;
   else if (atBottom) pane.scrollTop = pane.scrollHeight;
 }
+
+/**
+ * 跳到某一次调用：右栏留在完整记录里，滚到那一轮并高亮 —— 能看到它的输入、回答、工具和前后几轮。
+ * 以前是整栏换成那次调用的原始详情：每次调用的详情开头都长一样，看不出跳到了哪，前后文也没了。
+ * 记录里找不到这次调用（比如在看「全部运行」）就返回 false，由调用方退回原始详情。
+ */
+export async function focusCall(runId, callId) {
+  if (!runId) return false;
+  if (shownFor !== runId || !transcriptShown()) await showTranscript(runId);
+  const pane = $('detailPane');
+  const hit = pane.querySelector(`.tr [data-call="${CSS.escape(callId)}"]`);
+  if (!hit) return false;
+  const box = hit.closest('.tr-round') ?? hit;
+  for (const el of pane.querySelectorAll('.tr .cur')) el.classList.remove('cur');
+  box.classList.add('cur');
+  // 工具结果默认只露前 4 行 —— 跳过来就是要看它，全部展开
+  for (const d of box.querySelectorAll('.tr-result details')) d.open = true;
+  box.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  box.classList.remove('flash');
+  void box.offsetWidth; // 重新触发动画
+  box.classList.add('flash');
+  focused = callId;
+  return true;
+}
+
+/** 现在高亮着的那次调用（重新整理记录后要保持高亮） */
+let focused = null;
 
 /** 实时事件来了：正在看的那次运行有新调用就重新整理（攒一下，一轮里的几个事件只刷一次） */
 export function refreshTranscript(ms = 1500) {

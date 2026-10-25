@@ -918,6 +918,10 @@ main:has(#breakPane:not([hidden])) #detailPane { display: none; }
 .tlseg.repl { background: transparent; border: 1.5px solid var(--accent); }
 .tlseg.run { background: repeating-linear-gradient(90deg, var(--accent) 0 6px, color-mix(in srgb, var(--accent) 45%, transparent) 6px 12px); }
 .tlseg:hover { outline: 2px solid var(--text); outline-offset: 1px; }
+/* 一百多次调用挤在一条里时每块只有两三个像素 —— 点击区域往上下各扩一点，选中的那块描边 */
+.tlseg { min-width: 4px; }
+.tlseg::before { content: ''; position: absolute; inset: -5px -1px; }
+.tlseg.sel { outline: 2px solid var(--text); outline-offset: 1px; z-index: 2; }
 .mk { position: absolute; top: -11px; font-size: 9px; color: var(--warn); font-style: normal; pointer-events: none; transform: translateX(-2px); }
 .tl-now { position: absolute; right: 0; top: -4px; bottom: -4px; width: 2px; background: var(--accent); }
 
@@ -1179,3 +1183,12 @@ main:has(#breakPane:not([hidden])) #detailPane { display: none; }
 .tm-dur b { font-weight: 600; margin-left: 4px; color: var(--text); }
 .tm-dur b.slow { color: var(--err); }
 .tm-row.bad .tm-n { color: var(--err); }
+
+/* 从时间线 / 时序 / 调用列表跳过来的那一轮：高亮并闪一下，看得出跳到了哪 */
+.tr-round.cur {
+  margin: 0 -10px; padding: 10px 10px 8px; border-radius: 10px; border-top-color: transparent;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.tr-round.flash { animation: trFlash 1.2s ease-out; }
+@keyframes trFlash { 0%, 20% { background: color-mix(in srgb, var(--accent) 22%, transparent); } }

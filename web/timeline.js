@@ -10,13 +10,15 @@
 let onPickCall = () => {};
 let onPickRun = () => {};
 let source = () => ({ lanes: [], selectedRun: null });
+let selected = () => null;
 
 const MAX_LANES = 8;
 /** 有调用在跑时只看最近这么久 —— 不然一个 90 秒前的旧请求会把正在跑的这一条压成一根细线 */
 const LIVE_WINDOW_MS = 30_000;
 
-export function initTimeline({ pickCall, pickRun, data }) {
+export function initTimeline({ pickCall, pickRun, data, selected: sel }) {
   onPickCall = pickCall;
+  if (sel) selected = sel;
   onPickRun = pickRun;
   source = data;
   setInterval(() => {
@@ -74,6 +76,7 @@ function paint() {
         c.ok === 0 || c.error ? 'bad' : '',
         c.failing ? 'flag' : '',
         c.replayed ? 'repl' : '',
+        c.call_id === selected() ? 'sel' : '',
       ].filter(Boolean).join(' ');
       const tip = [
         c.kind === 'llm' ? `${c.model || '模型'}` : `${c.method || 'GET'} ${shortUrl(c.url)}`,
