@@ -1,7 +1,7 @@
 // 完整记录：把一次次「整段对话」的调用还原成一条不重复的对话时间线。
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildTiming, buildTranscript, type TranscriptCall } from '../src/server/transcript.ts';
+import { buildLoopMap, buildTiming, buildTranscript, toolFailed, type TranscriptCall } from '../src/server/transcript.ts';
 
 let t = 1000;
 const call = (extra: Partial<TranscriptCall>): TranscriptCall => ({
@@ -31,16 +31,15 @@ function agentLoop(): TranscriptCall[] {
   ];
 }
 
-test('★ 还原成对话：任务一次、每轮只显示新增的工具结果，上一轮的回答不重复', () => {
+test('★ 还原成对话：任务一次；工具结果挂回发起它的那一轮（命令和结果在一起）；上一轮的回答不重复', () => {
   const tr = buildTranscript(agentLoop());
   assert.equal(tr.task?.text, '测试当前服务有没有 bug');
   const rounds = tr.items.filter((i) => i.kind === 'llm' && !i.side) as any[];
   assert.deepEqual(rounds.map((r) => r.round), [1, 2]);
   assert.deepEqual(rounds[0].input, [], '第一轮的用户消息就是任务，不再重复');
   assert.deepEqual(rounds[0].reply.toolCalls, [{ name: 'bash', args: '{"command":"ls -la"}' }]);
-  assert.equal(rounds[1].input.length, 1, '第二轮只多出一条：工具结果（上一轮的回答不重复）');
-  assert.deepEqual(rounds[1].input[0].toolResults, [{ name: 'bash', text: 'total 8\nREADME.md' }], '工具名按调用 id 补上');
-  assert.equal(rounds[1].input[0].text, '', '«toolResult» 占位不当正文显示');
+  assert.deepEqual(rounds[0].results, [{ name: 'bash', text: 'total 8\nREADME.md' }], '结果挂在发起 ls 的第 1 轮，工具名按调用 id 补上');
+  assert.deepEqual(rounds[1].input, [], '第二轮没有新的用户消息（工具结果已经挪走，上一轮的回答不重复）');
   assert.equal(rounds[1].reply.text, '看完了，没有问题');
 });
 
@@ -79,7 +78,7 @@ test('很长的工具结果截断并标记（完整的点进那一轮看）', ()
     call({ messages: J([TASK]), response_tool_calls: J([bash('t1', 'cat big')]) }),
     call({ messages: J([TASK, { role: 'assistant', content: '', toolCalls: [bash('t1', 'cat big')] }, { role: 'user', content: '«toolResult»', toolResults: [{ callId: 't1', name: null, content: long }] }]) }),
   ]);
-  const res = (tr.items[1] as any).input[0].toolResults[0];
+  const res = (tr.items[0] as any).results[0];
   assert.equal(res.truncated, true);
   assert.equal(res.text.length, 4000);
 });
@@ -124,4 +123,44 @@ test('时序标签：参数太长被截断成不合法的 JSON，也能抠出命
   const { argBrief } = await import('../src/server/transcript.ts');
   assert.equal(argBrief(String.raw`{"command":"cat > .qa/ui-xss.mjs <<'EOF'\nimport { chromium } from`), `cat > .qa/ui-xss.mjs <<'EOF' import { chromium } from`);
   assert.equal(argBrief('{"path":"/a/b.txt"}'), '/a/b.txt');
+});
+
+// ── 循环图 ──
+
+test('★ 循环图：每个工具调了几次、失败几次（记在发起它的那一轮）、花了多久；最后一轮不调工具就是结论', () => {
+  const T = 5_000_000;
+  const ctx = (n: number) => {
+    const msgs: any[] = [TASK];
+    const cmds = ['ls', 'npm test', 'cat x'];
+    for (let i = 0; i < n; i++) {
+      msgs.push({ role: 'assistant', content: '', toolCalls: [bash(`t${i}`, cmds[i])] });
+      msgs.push({ role: 'user', content: '«toolResult»', toolResults: [{ callId: `t${i}`, name: null, content: i === 1 ? 'FAIL\n[exit code: 1]' : 'ok\n[exit code: 0]' }] });
+    }
+    return J(msgs);
+  };
+  const calls = [
+    call({ call_id: 'r1', started_at: T, duration_ms: 1000, messages: ctx(0), response_tool_calls: J([bash('t0', 'ls')]) }),
+    call({ call_id: 'r2', started_at: T + 1500, duration_ms: 1000, messages: ctx(1), response_tool_calls: J([bash('t1', 'npm test')]) }),
+    call({ call_id: 'r3', started_at: T + 32_500, duration_ms: 1000, messages: ctx(2), response_tool_calls: J([bash('t2', 'cat x')]) }),
+    call({ call_id: 'r4', started_at: T + 34_000, duration_ms: 1000, messages: ctx(3), response_text: '## 结论\n**全部通过**，除了 npm test' }),
+  ];
+  const m = buildLoopMap(buildTranscript(calls));
+  assert.equal(m.model.rounds, 4);
+  assert.equal(m.tools.length, 1);
+  const b = m.tools[0];
+  assert.deepEqual([b.name, b.count, b.failed], ['bash', 3, 1]);
+  assert.deepEqual(b.failedCallIds, ['r2'], '失败记在发起 npm test 的第 2 轮（命令和报错在同一处）');
+  assert.equal(b.ms, 500 + 30_000 + 500, '每轮之后的空档就是工具在跑');
+  assert.deepEqual(b.callIds, ['r1', 'r2', 'r3']);
+  assert.equal(b.last?.args, 'cat x');
+  assert.equal(m.final?.callId, 'r4');
+  assert.equal(m.final?.text, '结论 全部通过，除了 npm test', '去掉 Markdown 符号');
+  assert.equal(m.running, false);
+});
+
+test('失败只认框架写的退出码标记：输出正文里随口出现的「exited with code 1」不算', () => {
+  assert.equal(toolFailed({ text: 'boom\n[exit code: 2]' }), true);
+  assert.equal(toolFailed({ text: 'Daemon process exited with code 1\n…\n[exit code: 0]' }), false);
+  assert.equal(toolFailed({ text: 'Daemon process exited with code 1' }), false);
+  assert.equal(toolFailed({ text: 'x', isError: true }), true);
 });

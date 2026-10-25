@@ -15,11 +15,33 @@ const SLOW_MS = 30_000;
 let ctx = { openCall: () => {}, current: () => null, selected: () => null };
 let shownFor = null;
 let timer = null;
+/** 循环图上点了某个工具：只亮用了它的那几轮（模型调用 id 的集合） */
+let filterIds = null;
+let filterLabel = '';
+
+export function setTimingFilter(ids, label = '') {
+  filterIds = ids;
+  filterLabel = label;
+  applyFilter();
+}
+
+function applyFilter() {
+  const box = $('timingWrap');
+  box.classList.toggle('filtering', !!filterIds);
+  // 在时序里也要看得出「现在开着筛选」，并且能就地清掉 —— 不用回流程图
+  box.querySelector('.tm-filterbar')?.remove();
+  if (filterIds) {
+    box.querySelector('.tm-head')?.insertAdjacentHTML('afterend',
+      `<div class="tm-filterbar">只看 <b>${esc(filterLabel)}</b> 的 ${filterIds.size} 轮 <button type="button" class="lm-clear" data-clearfilter>清掉 ✕</button></div>`);
+  }
+  for (const el of box.querySelectorAll('.tm-row[data-call]')) el.classList.toggle('hit', !!filterIds?.has(el.dataset.call));
+}
 let loading = null;
 
 export function initTiming(c) {
   ctx = c;
   $('timingWrap').onclick = (e) => {
+    if (e.target.closest('[data-clearfilter]')) return ctx.clearFilter?.();
     const row = e.target.closest('[data-call]');
     if (row) ctx.openCall(row.dataset.call);
   };
@@ -49,6 +71,7 @@ export async function loadTiming(runId) {
   const nl = host.querySelector('.tm-rows');
   if (nl) nl.scrollTop = atBottom ? nl.scrollHeight : keepScroll;
   markTiming(ctx.selected());
+  applyFilter();
   // 有调用没回来、或者工具正在执行：空档在往右长，过一会儿再排一次
   clearTimeout(timer);
   if (tm.rows.some((r) => r.pending || r.gapRunning)) timer = setTimeout(() => refreshTiming(0), 2000);

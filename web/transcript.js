@@ -46,6 +46,7 @@ export async function showTranscript(runId) {
   box.innerHTML = t && !t.error ? render(t) : `<div class="tr-loading">${esc(t?.error ?? '取不到记录')}</div>`;
   for (const d of box.querySelectorAll('details[data-k]')) if (open.has(d.dataset.k)) d.open = true;
   if (focused) box.querySelector(`[data-call="${CSS.escape(focused)}"]`)?.closest('.tr-round')?.classList.add('cur');
+  applyFilter();
   box.onclick = (e) => {
     const go = e.target.closest('[data-call]');
     if (go && !e.target.closest('summary, details > :not(summary)')) ctx.openCall(go.dataset.call);
@@ -80,6 +81,22 @@ export async function focusCall(runId, callId) {
 
 /** 现在高亮着的那次调用（重新整理记录后要保持高亮） */
 let focused = null;
+/** 循环图上点了某个工具：只亮用了它的那几轮 */
+let filterIds = null;
+
+export function setTranscriptFilter(ids) {
+  filterIds = ids;
+  applyFilter();
+}
+
+function applyFilter() {
+  const box = $('detailPane')?.querySelector('.tr');
+  if (!box) return;
+  box.classList.toggle('filtering', !!filterIds);
+  for (const el of box.querySelectorAll('.tr-round')) {
+    el.classList.toggle('hit', !!filterIds?.has(el.querySelector('.tr-rh')?.dataset.call));
+  }
+}
 
 /** 实时事件来了：正在看的那次运行有新调用就重新整理（攒一下，一轮里的几个事件只刷一次） */
 export function refreshTranscript(ms = 1500) {
@@ -140,22 +157,28 @@ function itemHtml(it, i) {
     ${input}
     ${it.error ? `<div class="tr-err">✗ ${esc(it.error)}</div>` : ''}
     ${reply}
+    ${(it.results ?? []).map((r, n) => resultHtml(r, `${i}.res${n}`)).join('')}
+  </div>`;
+}
+
+/** 一个工具结果：默认露前 4 行，失败的（协议标错，或退出码不是 0）标红 */
+function resultHtml(r, k) {
+  const lines = r.text.split('\n');
+  const head = lines.slice(0, 4).join('\n');
+  const more = lines.length > 4 || r.truncated;
+  const code = [...r.text.matchAll(/\[exit code:\s*(-?\d+)\]/gi)].at(-1)?.[1];
+  const bad = r.isError || (code != null && Number(code) !== 0);
+  return `<div class="tr-result${bad ? ' bad' : ''}">
+    <div class="tr-who">工具结果 · ${esc(r.name)}${r.isError ? ' · 出错' : code != null && Number(code) !== 0 ? ` · 退出码 ${esc(code)}` : ''}</div>
+    ${more
+      ? `<details data-k="r${k}"><summary><pre>${esc(head)}</pre><span class="tr-expand">展开全部 ${lines.length} 行${r.truncated ? '（只带了前一段，完整的点「完整 prompt」）' : ''}</span></summary><pre>${esc(r.text)}</pre></details>`
+      : `<pre>${esc(r.text)}</pre>`}
   </div>`;
 }
 
 function msgHtml(m, k) {
   const parts = [];
-  for (const [n, r] of (m.toolResults ?? []).entries()) {
-    const lines = r.text.split('\n');
-    const head = lines.slice(0, 4).join('\n');
-    const more = lines.length > 4 || r.truncated;
-    parts.push(`<div class="tr-result${r.isError ? ' bad' : ''}">
-      <div class="tr-who">工具结果 · ${esc(r.name)}${r.isError ? ' · 出错' : ''}</div>
-      ${more
-        ? `<details data-k="r${k}.${n}"><summary><pre>${esc(head)}</pre><span class="tr-expand">展开全部 ${lines.length} 行${r.truncated ? '（只带了前一段，完整的点「完整 prompt」）' : ''}</span></summary><pre>${esc(r.text)}</pre></details>`
-        : `<pre>${esc(r.text)}</pre>`}
-    </div>`);
-  }
+  for (const [n, r] of (m.toolResults ?? []).entries()) parts.push(resultHtml(r, `${k}.${n}`));
   if (m.text) {
     const who = m.role === 'user' ? '用户' : m.role === 'assistant' ? '模型' : m.role === 'system' ? '系统' : m.role;
     parts.push(`<div class="tr-msg ${esc(m.role)}"><div class="tr-who">${who}</div><div class="tr-text">${esc(m.text)}${m.truncated ? '…' : ''}</div>${ctxHtml(m, k)}</div>`);

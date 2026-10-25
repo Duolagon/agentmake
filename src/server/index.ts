@@ -27,7 +27,7 @@ import { applyEdit, applyEdits, backupOf, revert } from './patch.ts';
 import { Gate } from './gate.ts';
 import { langfuseTracer } from './langfuse.ts';
 import { buildHistory } from './history.ts';
-import { buildTiming, buildTranscript } from './transcript.ts';
+import { buildLoopMap, buildTiming, buildTranscript } from './transcript.ts';
 
 /** 进程还在不在（同一台机器）。被杀掉的进程收不到 run.ended，不能一直显示「在跑」 */
 function pidAlive(pid: number): boolean {
@@ -575,6 +575,12 @@ const server = http.createServer(async (req, res) => {
       if (!runId) return json(res, { error: '需要 runId' }, 400);
       const calls = store.transcriptCalls(runId);
       return json(res, buildTranscript(calls, store.triggers([...new Set(calls.map((c) => c.run_id))])));
+    }
+    // 循环图：agent 和它的工具之间转了些什么（transcript.ts 的 buildLoopMap）
+    if (route === '/api/loopmap') {
+      const runId = url.searchParams.get('runId') ?? '';
+      if (!runId) return json(res, { error: '需要 runId' }, 400);
+      return json(res, buildLoopMap(buildTranscript(store.transcriptCalls(runId))));
     }
     // 时序：一轮一行的瀑布图，两轮之间的空档 = 工具执行时间（见 transcript.ts 的 buildTiming）
     if (route === '/api/timing') {

@@ -68,6 +68,9 @@ export type TItem =
       finish: string | null;
       input: TMessage[];
       reply: TMessage | null;
+      /** 这一轮发起的工具拿回来的结果。协议里它们是作为**下一轮**的输入发给模型的，
+          但人读的时候「命令 → 结果」得在一起：点「失败」跳过来，命令和报错要在同一处 */
+      results: NonNullable<TMessage['toolResults']>;
     }
   | {
       kind: 'http';
@@ -138,7 +141,7 @@ export function buildTranscript(calls: TranscriptCall[], triggers: Map<string, s
   const mainSystem = [...bySystem].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
 
   /** 已经出现过的对话：每次调用发出去的 messages + 它的回答，下一轮就接在它后面 */
-  const seen: { msgs: MessageIR[]; withReply: MessageIR[]; system: string; round: number }[] = [];
+  const seen: { msgs: MessageIR[]; withReply: MessageIR[]; system: string; round: number; item: Extract<TItem, { kind: 'llm' }> }[] = [];
   /** 工具调用 id → 工具名（Anthropic 的工具结果里只有 id） */
   const toolName = new Map<string, string>();
 
@@ -194,7 +197,14 @@ export function buildTranscript(calls: TranscriptCall[], triggers: Map<string, s
     if (base && base.withReply === base.msgs && fresh[0]?.role === 'assistant') fresh = fresh.slice(1);
     const round = base ? base.round + 1 : 1;
 
-    const input = fresh.map((m) => toTMessage(m, toolName));
+    let input = fresh.map((m) => toTMessage(m, toolName));
+    // 工具结果挪回发起它们的那一轮（上一轮），这一轮的输入里只剩新的用户消息
+    if (base) {
+      for (const m of input) {
+        if (m.toolResults?.length) base.item.results.push(...m.toolResults);
+      }
+      input = input.filter((m) => m.text || m.toolCalls?.length).map(({ toolResults: _r, ...m }) => m);
+    }
     const side = system !== mainSystem;
     if (!task && !side) {
       const first = msgs.find((m) => m.role === 'user' && m.content && !(m.toolResults ?? []).length);
@@ -209,7 +219,7 @@ export function buildTranscript(calls: TranscriptCall[], triggers: Map<string, s
         }
       : null;
 
-    items.push({
+    const item: Extract<TItem, { kind: 'llm' }> = {
       kind: 'llm',
       callId: c.call_id,
       runId: c.run_id,
@@ -231,12 +241,14 @@ export function buildTranscript(calls: TranscriptCall[], triggers: Map<string, s
         ? input.filter((m) => !(m.role === 'user' && m.text === task!.text && !m.toolResults))
         : input,
       reply,
-    });
+      results: [],
+    };
+    items.push(item);
 
     const replyMsg: MessageIR | null = reply
       ? { role: 'assistant', content: c.response_text ?? '', ...(replyCalls.length ? { toolCalls: replyCalls } : {}) }
       : null;
-    seen.push({ msgs, withReply: replyMsg ? [...msgs, replyMsg] : msgs, system, round });
+    seen.push({ msgs, withReply: replyMsg ? [...msgs, replyMsg] : msgs, system, round, item });
   }
 
   return { task, items, llm: llm.length, tool: calls.length - llm.length };
@@ -373,4 +385,120 @@ function shortUrl(u: string): string {
   } catch {
     return u;
   }
+}
+
+// ── 循环图：agent 和它的工具之间转了些什么 ─────────────────────
+//
+// 流程图按「哪一行代码发的调用」归并步骤，对 agent 循环几乎没用：dsh 的 103 轮都从同一处发出，
+// 只剩一张「×103」的卡片，而它真正在做的事 —— 用 bash 跑了 148 次命令、4 次退出码不为 0、
+// 杀掉一个卡住的任务 —— 全藏在模型回答里的工具调用中，图上一个都没有。
+// 这里从完整记录里把工具调用和工具结果拎出来：每个工具调了几次、失败几次、花了多久、最近一次干了什么。
+
+export type LoopTool = {
+  name: string;
+  count: number;
+  failed: number;
+  /** 这个工具花的时间：它所在那一轮之后的空档，按这一轮发起的工具个数平摊 */
+  ms: number;
+  /** 工具结果的总字数（回到模型那里的数据量） */
+  outChars: number;
+  last: { args: string; result: string | null } | null;
+  /** 发起过它的那几轮（模型调用 id）—— 点工具时在时序和完整记录里亮这几轮 */
+  callIds: string[];
+  failedCallIds: string[];
+};
+
+export type LoopMap = {
+  task: string | null;
+  model: { rounds: number; models: string[]; ms: number; tokensIn: number; tokensOut: number; firstCallId: string | null };
+  tools: LoopTool[];
+  side: { name: string; count: number; callIds: string[] }[];
+  http: { count: number; callIds: string[] };
+  final: { text: string; callId: string; round: number | null } | null;
+  /** 最后一轮还在等模型或工具 —— 还在跑 */
+  running: boolean;
+};
+
+/**
+ * 工具结果算不算失败：协议标了错，或者框架写在结果里的退出码不是 0（dsh 是结尾的「[exit code: 1]」，
+ * 以最后一个为准）。不认输出正文里随手出现的「exited with code 1」—— 那常常是被测程序打的日志，
+ * 命令本身好好的，算成失败就是误报
+ */
+export function toolFailed(r: { text: string; isError?: boolean }): boolean {
+  if (r.isError) return true;
+  const codes = [...r.text.matchAll(/\[exit code:\s*(-?\d+)\]/gi)];
+  return codes.length > 0 && Number(codes.at(-1)![1]) !== 0;
+}
+
+export function buildLoopMap(t: Transcript): LoopMap {
+  const rounds = t.items.filter((i) => i.kind === 'llm' && !i.side) as Extract<TItem, { kind: 'llm' }>[];
+  const tools = new Map<string, LoopTool>();
+  const tool = (name: string) => {
+    let x = tools.get(name);
+    if (!x) tools.set(name, (x = { name, count: 0, failed: 0, ms: 0, outChars: 0, last: null, callIds: [], failedCallIds: [] }));
+    return x;
+  };
+
+  rounds.forEach((r, k) => {
+    const calls = r.reply?.toolCalls ?? [];
+    const next = rounds[k + 1];
+    const gap = next && next.t != null && r.t != null ? Math.max(0, next.t - (r.t + (r.ms ?? 0))) : 0;
+    for (const c of calls) {
+      const x = tool(c.name);
+      x.count++;
+      x.ms += calls.length ? gap / calls.length : 0;
+      if (!x.callIds.includes(r.callId)) x.callIds.push(r.callId);
+      x.last = { args: argBrief(c.args), result: null };
+    }
+    // 这一轮发起的工具拿回来的结果（完整记录里已经挪回了这一轮）
+    for (const res of r.results) {
+      const x = tool(res.name);
+      x.outChars += res.text.length;
+      if (x.last && x.callIds.at(-1) === r.callId) x.last.result = res.text.replace(/\s+/g, ' ').slice(0, 120);
+      if (toolFailed(res)) {
+        x.failed++;
+        if (!x.failedCallIds.includes(r.callId)) x.failedCallIds.push(r.callId);
+      }
+    }
+  });
+
+  const side = new Map<string, { name: string; count: number; callIds: string[] }>();
+  const httpIds: string[] = [];
+  for (const i of t.items) {
+    if (i.kind === 'llm' && i.side) {
+      const s = side.get(i.thread ?? '') ?? { name: i.thread ?? '旁路', count: 0, callIds: [] };
+      s.count++;
+      s.callIds.push(i.callId);
+      side.set(i.thread ?? '', s);
+    }
+    if (i.kind === 'http') httpIds.push(i.callId);
+  }
+
+  const last = rounds.at(-1);
+  const final = last && !last.pending && !(last.reply?.toolCalls?.length) && last.reply?.text
+    ? { text: plain(last.reply.text).slice(0, 200), callId: last.callId, round: last.round }
+    : null;
+
+  return {
+    task: t.task ? plain(t.task.text).slice(0, 200) : null,
+    model: {
+      rounds: rounds.length,
+      models: [...new Set(rounds.map((r) => r.model).filter(Boolean) as string[])],
+      ms: rounds.reduce((n, r) => n + (r.ms ?? 0), 0),
+      tokensIn: rounds.reduce((n, r) => n + (r.tokensIn ?? 0), 0),
+      tokensOut: rounds.reduce((n, r) => n + (r.tokensOut ?? 0), 0),
+      firstCallId: rounds[0]?.callId ?? null,
+    },
+    // 花时间最多的在前：最该看的工具放最上面
+    tools: [...tools.values()].sort((a, b) => b.ms - a.ms || b.count - a.count),
+    side: [...side.values()],
+    http: { count: httpIds.length, callIds: httpIds },
+    final,
+    running: !!last && (last.pending || !!(last.reply?.toolCalls?.length) && !final),
+  };
+}
+
+/** 卡片上放的一句话：去掉 Markdown 的符号（## 标题、**加粗**、`代码`），只留字 */
+function plain(s: string): string {
+  return s.replace(/```[\s\S]*?```/g, ' ').replace(/^#+\s*/gm, '').replace(/[*_`>]+/g, '').replace(/\s+/g, ' ').trim();
 }

@@ -13,8 +13,9 @@ import { initVerify, loadVerify, noteRegress, progName } from './verify.js';
 import { initSpec, loadSpec, flowAnnotations } from './spec.js';
 import { initProjects, noteProcEvent } from './projects.js';
 import { initHistory, loadHistory, renderHistory, scheduleHistory } from './history.js';
-import { focusCall, initTranscript, refreshTranscript, showTranscript } from './transcript.js';
-import { initTiming, loadTiming, markTiming, refreshTiming } from './timing.js';
+import { focusCall, initTranscript, refreshTranscript, setTranscriptFilter, showTranscript } from './transcript.js';
+import { initTiming, loadTiming, markTiming, refreshTiming, setTimingFilter } from './timing.js';
+import { initLoopMap, renderLoopMap, repaintLoopMap } from './loopmap.js';
 
 const $ = (id) => document.getElementById(id);
 const calls = new Map();
@@ -26,6 +27,18 @@ let alertFilter = null; // 异常栏选中的那条：{ title, callIds:Set }
 let view = 'flow';     // flow = agent 语义流程（默认）| timing = 时序（agent 循环默认）| graph = 函数调用图
 /** 视图是用户自己点的（之后不再替他自动切），还是按运行的形状自动选的 */
 let viewPicked = false;
+/** 循环图上点了某个工具（或它的失败）：{ key, label, ids:Set<模型调用 id> }，时序和完整记录里只亮这几轮 */
+let roundFilter = null;
+
+function setRoundFilter(f) {
+  roundFilter = f;
+  repaintLoopMap();
+  setTimingFilter(f?.ids ?? null, f?.label ?? '');
+  setTranscriptFilter(f?.ids ?? null);
+  // 右栏跳到第一处，马上看得到是哪几轮
+  const first = f ? [...f.ids][0] : null;
+  if (first) jumpToCall(first);
+}
 let knownProjects = [];
 
 // ── SSE ────────────────────────────────────────────────────
@@ -373,6 +386,8 @@ async function loadGraph() {
     const f = await fetch(`/api/flow${q}`).then((r) => r.json()).catch(() => null);
     if (!f) return;
     lastFlow = f;
+    // agent 循环的「流程」画成循环图（模型 ⇄ 工具），不是按代码位置归并的步骤卡片 —— 见 loopmap.js
+    const loopMap = isAgentLoop(f) && !!currentRun;
     // agent 循环（同一步反复调模型）默认看时序：流程图会把 103 轮并成一张「×103」的卡片，先后顺序全丢了。
     // 用户自己点过视图就不再替他切
     if (!viewPicked) {
@@ -383,6 +398,12 @@ async function loadGraph() {
       renderAlerts(f.anomalies);
       renderSummary(f);
       await loadTiming(currentRun);
+      return;
+    }
+    if (loopMap) {
+      await renderLoopMap($('flow'), currentRun);
+      renderAlerts(f.anomalies);
+      renderSummary(f);
       return;
     }
     // 规格里没画到的实际步骤要在画布上标出来 —— 「跑了但你没画」正是最值钱的那条信息，
@@ -593,6 +614,7 @@ async function loadRunCalls(runId) {
 }
 
 async function selectRun(runId) {
+  if ((runId || null) !== currentRun && roundFilter) setRoundFilter(null); // 换了运行，上一次的筛选没意义了
   currentRun = runId || null;
   clearAlert();
   renderRunPicker();
@@ -1180,7 +1202,8 @@ async function boot() {
   initRailToggle();
   renderRunPicker();
   initTranscript({ openCall: showDetail, current: () => currentRun });
-  initTiming({ openCall: jumpToCall, current: () => currentRun, selected: () => selectedCall });
+  initTiming({ openCall: jumpToCall, current: () => currentRun, selected: () => selectedCall, clearFilter: () => setRoundFilter(null) });
+  initLoopMap({ jump: jumpToCall, filter: setRoundFilter, active: () => roundFilter });
   showTranscript(currentRun); // 右栏默认就是完整记录，不再空着等人点
   await loadRunCalls(currentRun);
   renderList();
