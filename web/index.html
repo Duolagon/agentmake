@@ -51,6 +51,7 @@
     <span class="mlbl">换个看法</span>
     <span class="seg">
       <button id="tabFlow" class="segbtn on" title="它实际做了什么">流程</button>
+      <button id="tabTiming" class="segbtn" title="按时间一轮一行：每轮模型想了多久、两轮之间工具跑了多久">时序</button>
       <button id="tabSpec" class="segbtn" title="你以为它怎么跑 —— 和实际对账">规格对账</button>
       <button id="tabGraph" class="segbtn" title="函数之间的调用关系（技术视角）">函数调用图</button>
       <button id="tabVerify" class="segbtn" title="改完重放，和基线逐步对齐；拿历史请求批量回归">验证</button>
@@ -71,6 +72,9 @@
     <div id="summary" class="summary"></div>
 
     <div id="flowWrap"><div id="flow"></div></div>
+
+    <!-- 时序：一轮一行的瀑布图，两轮之间的空档 = 工具在跑（timing.js） -->
+    <div id="timingWrap" hidden></div>
 
     <!-- 验证：改完重放，和基线逐步对齐；拿历史请求批量回归 -->
     <div id="verifyWrap" hidden></div>

@@ -263,3 +263,114 @@ function toTMessage(m: MessageIR, toolName: Map<string, string>): TMessage {
       : {}),
   };
 }
+
+// ── 时序：瀑布图的数据 ─────────────────────────────────────
+//
+// 一轮一行，同一条时间轴。每一轮两段：模型在想（这次调用本身的耗时），以及到下一轮开始之前的空档 ——
+// 单线程的 agent 循环里，这段空档就是它在本地跑工具（bash、读写文件）的时间。卡住的命令（dsh 跑浏览器测试
+// 挂了 120 秒）只在这里看得见：每次模型调用都正常，慢在两轮之间。
+
+export type TimingRow = {
+  callId: string;
+  kind: 'round' | 'side' | 'http';
+  round: number | null;
+  /** 距这次运行第一个调用开始多少毫秒 */
+  start: number;
+  ms: number | null;
+  pending: boolean;
+  /** 这一行的名字：工具调用的一句话摘要（bash ls -la ×2）、旁路的对话名、HTTP 的地址 */
+  label: string;
+  /** 这一轮发起的工具调用，一项一句 */
+  tools: string[];
+  /** 模型这一轮说了什么（开头一段，悬停时看） */
+  text: string;
+  error: string | null;
+  /** 这一轮结束到下一轮开始之间的工具执行时间；最后一轮且还在跑时是「到现在」 */
+  gap: number | null;
+  gapRunning: boolean;
+};
+
+export type Timing = { rows: TimingRow[]; span: number; modelMs: number; toolMs: number };
+
+export function buildTiming(t: Transcript, opts: { live: boolean; now: number }): Timing {
+  const timed = t.items.filter((i) => i.kind !== 'run' && i.t != null) as Exclude<TItem, { kind: 'run' }>[];
+  const t0 = Math.min(...timed.map((i) => i.t!));
+  const rounds = timed.filter((i) => i.kind === 'llm' && !i.side) as Extract<TItem, { kind: 'llm' }>[];
+  const nextStart = new Map<string, number>();
+  rounds.forEach((r, k) => { if (rounds[k + 1]) nextStart.set(r.callId, rounds[k + 1].t!); });
+
+  let modelMs = 0;
+  let toolMs = 0;
+  const rows: TimingRow[] = timed.map((i) => {
+    if (i.kind === 'http') {
+      return {
+        callId: i.callId, kind: 'http', round: null, start: i.t! - t0, ms: i.ms, pending: i.ms == null, label: `${i.method} ${shortUrl(i.url)}`,
+        tools: [], text: i.preview ?? '', error: i.ok ? null : `HTTP ${i.status ?? '失败'}`, gap: null, gapRunning: false,
+      };
+    }
+    const tools = (i.reply?.toolCalls ?? []).map((c) => `${c.name} ${argBrief(c.args)}`.trim());
+    const end = i.t! + (i.ms ?? 0);
+    let gap: number | null = null;
+    let gapRunning = false;
+    if (!i.side) {
+      modelMs += i.ms ?? 0;
+      const nx = nextStart.get(i.callId);
+      if (nx != null) gap = Math.max(0, nx - end);
+      else if (opts.live && !i.pending && tools.length) {
+        gap = Math.max(0, opts.now - end); // 最后一轮发起了工具、还没回到模型：工具正在跑
+        gapRunning = true;
+      }
+      toolMs += gap ?? 0;
+    }
+    return {
+      callId: i.callId,
+      kind: i.side ? 'side' : 'round',
+      round: i.round,
+      start: i.t! - t0,
+      ms: i.ms,
+      pending: i.pending,
+      label: i.side ? (i.thread ?? '旁路') : toolLabel(i.reply?.toolCalls ?? []),
+      tools,
+      text: (i.reply?.text ?? '').slice(0, 300),
+      error: i.error,
+      gap,
+      gapRunning,
+    };
+  });
+  const span = Math.max(0, ...rows.map((r) => r.start + (r.ms ?? 0) + (r.gap ?? 0)));
+  return { rows, span, modelMs, toolMs };
+}
+
+/** 一轮的名字：只有一个工具就写它的参数摘要；多个同名的写「bash ×2」；不调工具的就是在作答 */
+function toolLabel(calls: { name: string; args: string }[]): string {
+  if (!calls.length) return '作答';
+  if (calls.length === 1) return `${calls[0].name} ${argBrief(calls[0].args)}`.trim();
+  const names = [...new Set(calls.map((c) => c.name))];
+  return names.length === 1 ? `${names[0]} ×${calls.length}` : names.join(' · ');
+}
+
+/** 参数的一句话：常见的 command / path / query 直接取值，其余取紧凑 JSON 的开头 */
+export function argBrief(args: string): string {
+  try {
+    const o = JSON.parse(args);
+    if (o && typeof o === 'object') {
+      for (const k of ['command', 'cmd', 'path', 'file_path', 'query', 'q', 'url', 'pattern', 'job_id', 'description']) {
+        if (typeof o[k] === 'string') return o[k].replace(/\s+/g, ' ').slice(0, 80);
+      }
+    }
+  } catch {
+    // 很长的参数在完整记录里被截断过，已经不是合法 JSON —— 直接从开头把常见字段抠出来
+    const m = /"(command|cmd|path|file_path|query|q|url|pattern|job_id)"\s*:\s*"((?:[^"\\]|\\.){0,200})/.exec(String(args));
+    if (m) return m[2].replace(/\\n/g, ' ').replace(/\\(.)/g, '$1').replace(/\s+/g, ' ').slice(0, 80);
+  }
+  return String(args).replace(/\s+/g, ' ').slice(0, 80);
+}
+
+function shortUrl(u: string): string {
+  try {
+    const x = new URL(u);
+    return `${x.host}${x.pathname}`;
+  } catch {
+    return u;
+  }
+}

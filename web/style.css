@@ -1130,3 +1130,52 @@ main:has(#breakPane:not([hidden])) #detailPane { display: none; }
 .tr-num { flex: none; font-variant-numeric: tabular-nums; }
 .tr-run { font-size: 11px; color: var(--text-dim); padding: 8px 0 0; border-top: 1px solid var(--border); font-weight: 600; }
 .tr-back { margin-bottom: 12px; }
+
+/* ══════ 时序（瀑布图）══════
+   一轮一行，共用一条时间轴：蓝 = 模型在想，灰 = 两轮之间工具在跑，红 = 工具超过 30 秒 */
+.sumtop { display: flex; align-items: flex-start; gap: 10px; justify-content: space-between; }
+.sumview { flex: none; margin-top: -2px; }
+.sumview .segbtn { padding: 2px 11px; font-size: 11.5px; }
+#timingWrap { display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
+.tm-empty { color: var(--text-dim); padding: 24px 16px; font-size: 12.5px; }
+.tm-head {
+  display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; justify-content: space-between;
+  padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 11.5px; color: var(--text-dim);
+}
+.tm-slowtxt { color: var(--err); font-weight: 600; }
+.tm-legend { display: inline-flex; gap: 10px; }
+.tm-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.tm-legend i { display: inline-block; width: 12px; height: 8px; border-radius: 2px; }
+.tm-rows { overflow-y: auto; min-height: 0; flex: 1; padding: 0 10px 12px; }
+/* 时序视图下底部那条时间线和瀑布图说的是同一件事，收起来把高度让给瀑布图 */
+#left.timingview #timeline { display: none; }
+.tm-row {
+  display: grid; grid-template-columns: 26px minmax(80px, 30%) minmax(0, 1fr) 82px; gap: 6px; align-items: center;
+  height: 22px; font-size: 11.5px; cursor: pointer; border-radius: 4px; padding: 0 4px;
+}
+.tm-row:hover { background: var(--bg-sunken); }
+.tm-row.sel { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.tm-axisrow { position: sticky; top: 0; z-index: 1; background: var(--bg); cursor: default; height: 24px; }
+.tm-axisrow:hover { background: var(--bg); }
+.tm-axis { position: relative; height: 14px; border-bottom: 1px solid var(--border); }
+.tm-axis span { position: absolute; top: 0; transform: translateX(-50%); font-size: 10px; color: var(--text-dim); white-space: nowrap; }
+.tm-axis span:first-child { transform: none; }
+.tm-axis span:last-child { transform: translateX(-100%); }
+.tm-n { color: var(--text-dim); text-align: right; font-variant-numeric: tabular-nums; font-size: 11px; }
+.tm-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 11px; }
+.tm-side .tm-label, .tm-http .tm-label { color: var(--text-dim); }
+.tm-track { position: relative; height: 10px; background: color-mix(in srgb, var(--text-dim) 7%, transparent); border-radius: 2px; }
+.tm-track i { position: absolute; top: 0; height: 10px; border-radius: 2px; }
+.tm-m { background: var(--accent); }
+.tm-s { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+.tm-h { background: color-mix(in srgb, var(--text-dim) 70%, transparent); }
+.tm-g { background: color-mix(in srgb, var(--text-dim) 40%, transparent); }
+.tm-g.slow { background: var(--err); }
+.tm-g.run, .tm-m.run { background-image: repeating-linear-gradient(90deg, transparent 0 5px, rgb(255 255 255 / .45) 5px 9px); animation: tmRun 1s linear infinite; background-size: 18px 100%; }
+@keyframes tmRun { to { background-position: 18px 0; } }
+.tm-m.bad, .tm-h.bad { background: var(--err); }
+.tm-legend .tm-m, .tm-legend .tm-g { position: static; }
+.tm-dur { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-dim); font-size: 11px; white-space: nowrap; }
+.tm-dur b { font-weight: 600; margin-left: 4px; color: var(--text); }
+.tm-dur b.slow { color: var(--err); }
+.tm-row.bad .tm-n { color: var(--err); }

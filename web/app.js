@@ -14,6 +14,7 @@ import { initSpec, loadSpec, flowAnnotations } from './spec.js';
 import { initProjects, noteProcEvent } from './projects.js';
 import { initHistory, loadHistory, renderHistory, scheduleHistory } from './history.js';
 import { initTranscript, refreshTranscript, showTranscript } from './transcript.js';
+import { initTiming, loadTiming, markTiming, refreshTiming } from './timing.js';
 
 const $ = (id) => document.getElementById(id);
 const calls = new Map();
@@ -22,7 +23,9 @@ let selectedCall = null;
 let currentRun = null; // null = 全部
 let nodeFilter = null; // 调用图上选中的函数节点
 let alertFilter = null; // 异常栏选中的那条：{ title, callIds:Set }
-let view = 'flow';     // flow = agent 语义流程（默认）| graph = 函数调用图
+let view = 'flow';     // flow = agent 语义流程（默认）| timing = 时序（agent 循环默认）| graph = 函数调用图
+/** 视图是用户自己点的（之后不再替他自动切），还是按运行的形状自动选的 */
+let viewPicked = false;
 let knownProjects = [];
 
 // ── SSE ────────────────────────────────────────────────────
@@ -91,7 +94,7 @@ function applyEvent(ev) {
         system_preview: (ev.request.system || '').slice(0, 160),
         started_at: ev.ts, pending: true,
       });
-      renderList(); scheduleGraph(); refreshTranscript(400);
+      renderList(); scheduleGraph(); refreshTranscript(400); refreshTiming(400);
       break;
 
     case 'llm.after': {
@@ -106,7 +109,7 @@ function applyEvent(ev) {
         faked: ev.faked ? 1 : 0,
         replayed: ev.replayed ? 1 : 0,
       });
-      renderList(); scheduleGraph(); scheduleHistory(2500); refreshTranscript();
+      renderList(); scheduleGraph(); scheduleHistory(2500); refreshTranscript(); refreshTiming();
       if (selectedCall === ev.callId) showDetail(ev.callId);
       break;
     }
@@ -175,7 +178,7 @@ function applyEvent(ev) {
         status: ev.status, ok: ev.ok ? 1 : 0, duration_ms: ev.durationMs,
         error: ev.error, started_at: ev.ts,
       });
-      renderList(); scheduleGraph(); refreshTranscript();
+      renderList(); scheduleGraph(); refreshTranscript(); refreshTiming();
       break;
   }
 }
@@ -366,10 +369,22 @@ function scheduleGraph() {
 
 async function loadGraph() {
   const q = currentRun ? `?runId=${encodeURIComponent(currentRun)}` : '';
-  if (view === 'flow') {
+  if (view === 'flow' || view === 'timing') {
     const f = await fetch(`/api/flow${q}`).then((r) => r.json()).catch(() => null);
     if (!f) return;
     lastFlow = f;
+    // agent 循环（同一步反复调模型）默认看时序：流程图会把 103 轮并成一张「×103」的卡片，先后顺序全丢了。
+    // 用户自己点过视图就不再替他切
+    if (!viewPicked) {
+      const want = isAgentLoop(f) ? 'timing' : 'flow';
+      if (want !== view) return switchView(want, false);
+    }
+    if (view === 'timing') {
+      renderAlerts(f.anomalies);
+      renderSummary(f);
+      await loadTiming(currentRun);
+      return;
+    }
     // 规格里没画到的实际步骤要在画布上标出来 —— 「跑了但你没画」正是最值钱的那条信息，
     // 藏在另一个标签页里等于没有。
     await loadSpec(currentRun);
@@ -400,6 +415,9 @@ let lastFlow = null;
  * 这是页面上最重要的一行。上一版把它写成 `2 步 · 1 个循环 · 1 次 LLM · 11 次工具`，
  * 等于把原始计数丢给用户，让他自己在脑子里翻译成一句话。
  */
+/** 这次运行是不是 agent 循环：同一步反复调模型（dsh 那种一轮接一轮） */
+const isAgentLoop = (f) => (f?.steps ?? []).some((s) => s.kind === 'llm' && s.calls >= 3);
+
 function renderSummary(f) {
   const host = $('summary');
   const s = summarize(f);
@@ -419,10 +437,16 @@ function renderSummary(f) {
 
   // 重放出来的运行：一键去和基线对比 —— 改完重跑之后最想问的就是「变好了没有」
   const replayed = currentRun && runs.get(currentRun)?.replay_of;
+  // 流程 / 时序：两种看法放在最显眼的地方切，不藏进「更多」
+  const pick = `<span class="seg sumview">
+    <button type="button" class="segbtn${view === 'flow' ? ' on' : ''}" data-v="flow" title="按步骤看它做了什么、数据怎么流">流程</button>
+    <button type="button" class="segbtn${view === 'timing' ? ' on' : ''}" data-v="timing" title="按时间一轮一行：每轮模型想了多久、两轮之间工具跑了多久">时序</button>
+  </span>`;
   host.innerHTML =
-    `<div class="sumline">${esc(s.what)}${replayed ? ' <button type="button" class="btn vf-jump" id="toVerify">和基线对比 ▸</button>' : ''}</div>` +
+    `<div class="sumtop"><div class="sumline">${esc(s.what)}${replayed ? ' <button type="button" class="btn vf-jump" id="toVerify">和基线对比 ▸</button>' : ''}</div>${pick}</div>` +
     `<div class="submeta">${bits.join(' · ')}</div>`;
   if (replayed) $('toVerify').onclick = () => switchView('verify');
+  for (const b of host.querySelectorAll('.sumview [data-v]')) b.onclick = () => switchView(b.dataset.v);
 }
 
 /** 验证视图点了一步：右边显示这一步改前改后的 prompt / 输出差异 */
@@ -499,11 +523,12 @@ function initAttach(health) {
   show('node');
 }
 
-const VIEW_TITLE = { flow: 'Agent 流程 ', spec: '规格 vs 实际 ', graph: '函数调用图 ', verify: '验证 ' };
+const VIEW_TITLE = { flow: 'Agent 流程 ', timing: '时序 ', spec: '规格 vs 实际 ', graph: '函数调用图 ', verify: '验证 ' };
 
-function switchView(v) {
+function switchView(v, picked = true) {
   view = v;
-  for (const k of ['flow', 'spec', 'graph', 'verify']) {
+  if (picked) viewPicked = true;
+  for (const k of ['flow', 'timing', 'spec', 'graph', 'verify']) {
     $(`tab${k[0].toUpperCase()}${k.slice(1)}`).classList.toggle('on', v === k);
   }
   $('left').classList.toggle('verifyview', v === 'verify');
@@ -512,6 +537,8 @@ function switchView(v) {
   // 的空间分配反过来：规格占主，调用列表退成一条。
   $('left').classList.toggle('specview', v === 'spec');
   $('flowWrap').hidden = v !== 'flow';
+  $('timingWrap').hidden = v !== 'timing';
+  $('left').classList.toggle('timingview', v === 'timing');
   $('specWrap').hidden = v !== 'spec';
   $('canvasWrap').hidden = v !== 'graph';
   $('fit').hidden = v !== 'graph';
@@ -802,6 +829,7 @@ function shortRun(r, kids = []) {
 
 async function showDetail(callId) {
   selectedCall = callId;
+  markTiming(callId);
   renderList();
   const pane = $('detailPane');
 
@@ -909,6 +937,7 @@ async function showDetail(callId) {
   pane.innerHTML = parts.join('');
   $('trBack')?.addEventListener('click', () => {
     selectedCall = null;
+    markTiming(null);
     renderList();
     showTranscript(currentRun);
   });
@@ -1136,6 +1165,7 @@ async function boot() {
   initRailToggle();
   renderRunPicker();
   initTranscript({ openCall: showDetail, current: () => currentRun });
+  initTiming({ openCall: showDetail, current: () => currentRun, selected: () => selectedCall });
   showTranscript(currentRun); // 右栏默认就是完整记录，不再空着等人点
   await loadRunCalls(currentRun);
   renderList();
@@ -1180,6 +1210,7 @@ async function boot() {
   };
 
   $('tabFlow').onclick = () => switchView('flow');
+  $('tabTiming').onclick = () => switchView('timing');
   $('tabSpec').onclick = () => switchView('spec');
   $('tabGraph').onclick = () => switchView('graph');
   $('tabVerify').onclick = () => switchView('verify');

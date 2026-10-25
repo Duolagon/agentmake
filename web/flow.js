@@ -73,18 +73,27 @@ export function summarize(f) {
   const llms = f.steps.filter((s) => s.kind === 'llm');
   const toolCalls = tools.reduce((n, s) => n + s.calls, 0);
   const llmCalls = llms.reduce((n, s) => n + s.calls, 0);
-  const concurrent = f.steps.some((s) => s.concurrency > 1);
+  // 「同时进行」只说抓数据的调用自己真的并发了（Promise.all 抓 7 个信源）——
+  // 以前看的是全部步骤，dsh 的主循环和起标题的旁路调用重叠了一下，就被说成「抓数据同时进行」
+  const concurrent = tools.some((s) => s.concurrency > 1);
+  const models = [...new Set(llms.map((s) => s.model).filter(Boolean))];
+  const model = models.length === 1 ? ` · ${models[0]}` : '';
+  // agent 循环（同一步反复调模型）：一轮接一轮，工具穿插在中间 —— 不能说成「先抓数据，然后问模型」
+  const loop = llms.reduce((m, s) => (s.calls > (m?.calls ?? 0) ? s : m), null);
 
   const parts = [];
-  if (toolCalls) parts.push(`抓了 ${toolCalls} 次数据${concurrent ? '（同时进行）' : ''}`);
-  if (llmCalls) {
-    const models = [...new Set(llms.map((s) => s.model).filter(Boolean))];
-    parts.push(`问了模型 ${llmCalls} 次${models.length === 1 ? ` · ${models[0]}` : ''}`);
+  if (loop && loop.calls >= 3) {
+    parts.push(`agent 跑了 ${loop.calls} 轮${llmCalls > loop.calls ? `（一共问了模型 ${llmCalls} 次）` : ''}${model}`);
+    if (toolCalls) parts.push(`期间抓了 ${toolCalls} 次数据${concurrent ? '（有并发）' : ''}`);
+  } else {
+    if (toolCalls) parts.push(`抓了 ${toolCalls} 次数据${concurrent ? '（同时进行）' : ''}`);
+    if (llmCalls) parts.push(`问了模型 ${llmCalls} 次${model}`);
   }
+  const joiner = loop && loop.calls >= 3 ? '，' : '，然后 ';
 
   const loops = f.loops.filter((l) => l.stepIds.length);
   return {
-    what: parts.join('，然后 ') || '这次运行没有对外调用',
+    what: parts.join(joiner) || '这次运行没有对外调用',
     loops: loops.map((l) => `${loopName(l)}转了 ${l.iterations} 轮`).join('、'),
     time: fmtMs(f.totals.ms),
     tokens:
@@ -161,7 +170,12 @@ function legend() {
 }
 
 function colHtml(r) {
-  const head = r.steps.length > 1 ? `<div class="parallel">这 ${r.steps.length} 步同时进行</div>` : '';
+  // 一列里有一步是反复调用的循环（dsh 主 agent 那张「×103」）：它横跨整次运行，和谁都「重叠」——
+  // 那不是同时进行，是别的调用穿插在它的轮次之间。真正的先后看「时序」
+  const looped = r.steps.some((s) => s.calls >= 3);
+  const head = r.steps.length > 1
+    ? `<div class="parallel">${looped ? `这 ${r.steps.length} 步穿插进行 · 先后顺序看「时序」` : `这 ${r.steps.length} 步同时进行`}</div>`
+    : '';
   return `<div class="fl-col">${head}${r.steps.map(stepNode).join('')}</div>`;
 }
 

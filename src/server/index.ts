@@ -27,7 +27,7 @@ import { applyEdit, applyEdits, backupOf, revert } from './patch.ts';
 import { Gate } from './gate.ts';
 import { langfuseTracer } from './langfuse.ts';
 import { buildHistory } from './history.ts';
-import { buildTranscript } from './transcript.ts';
+import { buildTiming, buildTranscript } from './transcript.ts';
 
 /** 进程还在不在（同一台机器）。被杀掉的进程收不到 run.ended，不能一直显示「在跑」 */
 function pidAlive(pid: number): boolean {
@@ -575,6 +575,19 @@ const server = http.createServer(async (req, res) => {
       if (!runId) return json(res, { error: '需要 runId' }, 400);
       const calls = store.transcriptCalls(runId);
       return json(res, buildTranscript(calls, store.triggers([...new Set(calls.map((c) => c.run_id))])));
+    }
+    // 时序：一轮一行的瀑布图，两轮之间的空档 = 工具执行时间（见 transcript.ts 的 buildTiming）
+    if (route === '/api/timing') {
+      const runId = url.searchParams.get('runId') ?? '';
+      if (!runId) return json(res, { error: '需要 runId' }, 400);
+      const calls = store.transcriptCalls(runId);
+      if (!calls.length) return json(res, { rows: [], span: 0, modelMs: 0, toolMs: 0 });
+      // 进程还在：最后一轮发起了工具、还没回到模型，就算「工具正在执行」。
+      // 不看请求级运行有没有结束 —— dsh 这类服务收到一轮对话的请求就先回了，agent 在后台接着跑
+      const run = store.getRun(runId) as { ended_at?: number | null; parent_run_id?: string | null; pid?: number | null } | undefined;
+      const proc = run?.parent_run_id ? (store.getRun(run.parent_run_id) as typeof run) : run;
+      const live = !!proc && proc.ended_at == null && proc.pid != null && pidAlive(proc.pid);
+      return json(res, buildTiming(buildTranscript(calls), { live, now: Date.now() }));
     }
     // 历史：按「一次干活」列，带任务原文和结果，给人找「上次那一次」用（见 history.ts）
     if (route === '/api/history') {
