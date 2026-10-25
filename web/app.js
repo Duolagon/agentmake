@@ -15,7 +15,8 @@ import { initProjects, noteProcEvent } from './projects.js';
 import { initHistory, loadHistory, renderHistory, scheduleHistory } from './history.js';
 import { focusCall, initTranscript, refreshTranscript, setTranscriptFilter, showTranscript } from './transcript.js';
 import { initTiming, loadTiming, markTiming, refreshTiming, setTimingFilter } from './timing.js';
-import { initLoopMap, renderLoopMap, repaintLoopMap } from './loopmap.js';
+import { initLoopMap, repaintLoopMap } from './loopmap.js';
+import { initFlowMap, renderFlowMap, repaintFlowMap } from './flowmap.js';
 
 const $ = (id) => document.getElementById(id);
 const calls = new Map();
@@ -33,6 +34,7 @@ let roundFilter = null;
 function setRoundFilter(f) {
   roundFilter = f;
   repaintLoopMap();
+  repaintFlowMap();
   setTimingFilter(f?.ids ?? null, f?.label ?? '');
   setTranscriptFilter(f?.ids ?? null);
   // 右栏跳到第一处，马上看得到是哪几轮
@@ -401,7 +403,7 @@ async function loadGraph() {
       return;
     }
     if (loopMap) {
-      await renderLoopMap($('flow'), currentRun);
+      await renderFlowMap($('flow'), currentRun);
       renderAlerts(f.anomalies);
       renderSummary(f);
       return;
@@ -804,6 +806,7 @@ async function jumpToCall(callId) {
   selectedCall = callId;
   renderList();
   markTiming(callId);
+  repaintFlowMap();
   if (view === 'verify') return showDetail(callId); // 验证视图的右栏是改前改后对比，不动它
   const c = calls.get(callId);
   // 这次调用属于哪次运行：在看「全部运行」时也能跳到它自己那次的记录里
@@ -1204,6 +1207,7 @@ async function boot() {
   initTranscript({ openCall: showDetail, current: () => currentRun });
   initTiming({ openCall: jumpToCall, current: () => currentRun, selected: () => selectedCall, clearFilter: () => setRoundFilter(null) });
   initLoopMap({ jump: jumpToCall, filter: setRoundFilter, active: () => roundFilter });
+  initFlowMap({ jump: jumpToCall, filter: setRoundFilter, active: () => roundFilter, selected: () => selectedCall });
   showTranscript(currentRun); // 右栏默认就是完整记录，不再空着等人点
   await loadRunCalls(currentRun);
   renderList();

@@ -500,5 +500,241 @@ export function buildLoopMap(t: Transcript): LoopMap {
 
 /** 卡片上放的一句话：去掉 Markdown 的符号（## 标题、**加粗**、`代码`），只留字 */
 function plain(s: string): string {
-  return s.replace(/```[\s\S]*?```/g, ' ').replace(/^#+\s*/gm, '').replace(/[*_`>]+/g, '').replace(/\s+/g, ' ').trim();
+  // 只去强调符号（**粗**、__粗__、`代码`、行首的 # 和 >），不碰单词中间的下划线 —— NODE_OPTIONS 不能变成 NODEOPTIONS
+  return s.replace(/```[\s\S]*?```/g, ' ').replace(/^#+\s*/gm, '').replace(/^>\s*/gm, '').replace(/\*\*|__(?=\S)|(?<=\S)__|`/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// ── 详细流程图：步骤 → 轮次 → 想 / 做 / 得 ────────────────────────
+//
+// 循环图只说「用了什么工具、用了几次」，过程、因果、下钻全丢了。这里把一次运行还原成能展开、能分析的流程：
+//   · 步骤：agent 每做一件新事都会先说一句打算（dsh 103 轮里说了 36 次）—— 用这些话切步骤。
+//     一句话里常常前半句是上一步的结果（「单测 180/180 通过」），后半句才是这一步要做的（「现在把 e2e 挪到 8797」），
+//     所以标题取「要做的」，上一步的「结果」取这一句里的结论部分。从头到尾不说话的 agent 退到按动作类别和长空档切。
+//   · 动作类别（参考 Agent ATO 的分色泳道）：读 / 执行 / 写 / 测试 / 其他，按工具名和命令规则判。
+//     一格一轮着色的节奏条上，阶段自己就显出来了。
+//   · 异常（参考 TraceView 的语义连线，改成规则自动判）：失败（退出码不为 0）、卡住（两轮之间工具跑了 30 秒以上）、
+//     换路（说了「改用 / 换成」，或上一步失败 / 卡住之后换了做法）、重复（同一类命令在一步里跑了 3 次以上）、
+//     发现（「发现 / 缺陷」）、通过（「✅ / 通过」）。
+
+export type ActionCat = 'read' | 'exec' | 'write' | 'test' | 'other';
+
+/** 一次工具调用属于哪类动作 —— 规则判，少数命令会分错，宁可归「其他」 */
+export function categorize(name: string, args: string): ActionCat {
+  const n = name.toLowerCase();
+  if (/^(write|edit|str_replace|apply_patch|create_file|multi_edit|notebook_edit)/.test(n)) return 'write';
+  if (/^(read|read_image|glob|grep|ls|list|search|view|open_file|fetch|web_fetch|web_search)/.test(n)) return 'read';
+  if (/^(job_|kill|run|exec)/.test(n)) return 'exec';
+  let cmd = '';
+  try {
+    const o = JSON.parse(args);
+    cmd = typeof o?.command === 'string' ? o.command : typeof o?.cmd === 'string' ? o.cmd : '';
+  } catch {
+    cmd = /"(?:command|cmd)"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(args)?.[1] ?? '';
+  }
+  if (!cmd) return n === 'bash' || n === 'shell' || n === 'terminal' ? 'exec' : 'other';
+  if (/(^|[;&|]\s*)(npm (run )?test|npm run test|node --test|pytest|go test|cargo test|jest|vitest|mocha)\b|\be2e\b/.test(cmd)) return 'test';
+  if (/cat\s*>|\btee\b|sed -i|python3? - <<|>\s*[\w./-]+\.(m?[jt]s|py|md|json|ya?ml|txt|sh)\b|\bmkdir\b|\bcp\b|\bmv\b|\brm\b/.test(cmd)) return 'write';
+  if (/^\s*(cd [^;&]+[;&]+\s*)?(ls|cat|head|tail|sed -n|grep|rg|find|wc|lsof|ps|git (status|log|diff|show|rev-parse)|echo '?=+|pwd|which|stat|du)\b/.test(cmd)) return 'read';
+  return 'exec';
+}
+
+export type FlowRound = {
+  callId: string;
+  round: number;
+  /** 距运行开始多少毫秒 */
+  start: number;
+  ms: number | null;
+  /** 这一轮之后到下一轮之前的工具执行时间 */
+  gap: number | null;
+  /** 这一轮的主类别（节奏条上的颜色）和全部类别 */
+  cat: ActionCat | null;
+  cats: ActionCat[];
+  /** 想：模型这一轮说的话（不说话就是 null） */
+  said: string | null;
+  /** 做：这一轮发起的工具调用 */
+  acts: { name: string; brief: string; cat: ActionCat }[];
+  /** 得：工具拿回来的结果（一行摘要），失败的标出退出码 */
+  got: { name: string; brief: string; failed: boolean; code: number | null }[];
+  failed: boolean;
+  stalled: boolean;
+  pending: boolean;
+};
+
+export type FlowTag = { kind: 'fail' | 'stall' | 'turn' | 'repeat' | 'find' | 'pass'; text: string };
+
+export type FlowStep = {
+  n: number;
+  from: number;
+  to: number;
+  title: string;
+  /** 这一步的结果：下一步开头那句话里的结论部分 */
+  result: string | null;
+  callIds: string[];
+  ms: number;
+  mix: Record<ActionCat, number>;
+  tags: FlowTag[];
+  /** 从上一步到这一步是怎么过来的：顺着推进 / 失败或卡住之后换路 / 上一步结尾卡住了 */
+  edge: 'next' | 'turn' | 'stall';
+  edgeNote: string | null;
+};
+
+export type FlowMap = {
+  task: string | null;
+  final: { text: string; callId: string; round: number | null } | null;
+  rounds: FlowRound[];
+  steps: FlowStep[];
+  /** 切步骤用的是 agent 说的话，还是退到了按动作类别 / 空档切（不说话的 agent） */
+  splitBy: 'said' | 'actions';
+  summary: { rounds: number; steps: number; ms: number; fails: number; stalls: number; turns: number; finds: number; repeats: number; mix: Record<ActionCat, number> };
+};
+
+/** 两轮之间工具跑了多久算「卡住」 */
+export const STALL_MS = 30_000;
+
+const INTENT = /(现在|接下来|下一步|下一个|先|开始|继续|改用|换成|转而|趁|准备|然后|再|我会|我将|我来|让我|最后|let me|next|now|i'll|i will|first|then|switch)/i;
+const TURN = /(改用|换成|换用|转而|绕过|改为|instead|switch(ed)? to|fall ?back)/i;
+const FIND = /(发现|缺陷|漏洞|\bbug\b|found a)/i;
+const PASS = /(✅|通过|全绿|passed|all green|没有问题|正常)/i;
+
+/** 一句话拆成「结论」和「打算」两半（按句号切，含打算关键词的句子算打算） */
+export function splitSaid(text: string): { finding: string; intent: string } {
+  const sentences = plain(text).split(/(?<=[。！？!?；;])\s*|\n+/).map((s) => s.trim()).filter(Boolean);
+  const idx = sentences.findIndex((s) => INTENT.test(s));
+  if (idx < 0) return { finding: sentences.join(''), intent: '' };
+  return { finding: sentences.slice(0, idx).join(''), intent: sentences.slice(idx).join('') };
+}
+
+export function buildFlowMap(t: Transcript): FlowMap {
+  const rounds = t.items.filter((i) => i.kind === 'llm' && !i.side) as Extract<TItem, { kind: 'llm' }>[];
+  const t0 = rounds[0]?.t ?? 0;
+  const empty = (): Record<ActionCat, number> => ({ read: 0, exec: 0, write: 0, test: 0, other: 0 });
+
+  const fr: FlowRound[] = rounds.map((r, k) => {
+    const calls = r.reply?.toolCalls ?? [];
+    const acts = calls.map((c) => ({ name: c.name, brief: argBrief(c.args), cat: categorize(c.name, c.args) }));
+    const next = rounds[k + 1];
+    const gap = next && next.t != null && r.t != null ? Math.max(0, next.t - (r.t + (r.ms ?? 0))) : null;
+    const got = r.results.map((x) => {
+      const codes = [...x.text.matchAll(/\[exit code:\s*(-?\d+)\]/gi)];
+      return { name: x.name, brief: x.text.replace(/\[exit code:\s*-?\d+\]/gi, '').replace(/\s+/g, ' ').trim().slice(0, 140), failed: toolFailed(x), code: codes.length ? Number(codes.at(-1)![1]) : null };
+    });
+    const count = empty();
+    for (const a of acts) count[a.cat]++;
+    const cat = acts.length ? (Object.entries(count).sort((a, b) => b[1] - a[1])[0][0] as ActionCat) : null;
+    return {
+      callId: r.callId,
+      round: r.round ?? k + 1,
+      start: (r.t ?? t0) - t0,
+      ms: r.ms,
+      gap,
+      cat,
+      cats: [...new Set(acts.map((a) => a.cat))],
+      said: r.reply?.text?.trim() ? plain(r.reply.text).slice(0, 400) : null,
+      acts,
+      got,
+      failed: got.some((g) => g.failed),
+      stalled: (gap ?? 0) >= STALL_MS,
+      pending: r.pending,
+    };
+  });
+
+  // 最后一轮不调工具、说了话 —— 那是结论，不算一个步骤
+  const last = rounds.at(-1);
+  const final = last && !last.pending && !(last.reply?.toolCalls?.length) && last.reply?.text
+    ? { text: plain(last.reply.text).slice(0, 300), callId: last.callId, round: last.round }
+    : null;
+  const body = final ? fr.slice(0, -1) : fr;
+
+  // ── 切步骤 ──
+  const saidCount = body.filter((r) => r.said).length;
+  const splitBy: FlowMap['splitBy'] = saidCount >= 3 ? 'said' : 'actions';
+  const groups: FlowRound[][] = [];
+  for (const [k, r] of body.entries()) {
+    const prev = body[k - 1];
+    const cut = splitBy === 'said'
+      ? !!r.said
+      : !prev || (prev.stalled || (r.cat !== prev.cat && r.cat != null && prev.cat != null));
+    if (cut || !groups.length) groups.push([]);
+    groups.at(-1)!.push(r);
+  }
+
+  const steps: FlowStep[] = groups.map((g, i) => {
+    const first = g[0];
+    const nextFirst = groups[i + 1]?.[0] ?? (final ? fr.at(-1) : undefined);
+    const own = first.said ? splitSaid(first.said) : { finding: '', intent: '' };
+    const title = (own.intent || own.finding || (first.acts[0] ? `${first.acts[0].name} ${first.acts[0].brief}` : '作答')).slice(0, 160);
+    // 结果在下一步开头那句话的「结论」部分；最后一步的结果就是结论本身
+    const nx = nextFirst?.said ? splitSaid(nextFirst.said) : null;
+    const result = (nx?.finding || (nextFirst === fr.at(-1) && final ? final.text : '')).slice(0, 200) || null;
+
+    const mix = empty();
+    for (const r of g) for (const a of r.acts) mix[a.cat]++;
+    const lastR = g.at(-1)!;
+    const end = (nextFirst ? nextFirst.start : lastR.start + (lastR.ms ?? 0));
+    const tags: FlowTag[] = [];
+    const fails = g.reduce((n, r) => n + r.got.filter((x) => x.failed).length, 0);
+    if (fails) tags.push({ kind: 'fail', text: `${fails} 次失败` });
+    const stalls = g.filter((r) => r.stalled && r !== lastR);
+    for (const r of stalls) tags.push({ kind: 'stall', text: `第 ${r.round} 轮后卡住 ${fmtDur(r.gap!)}` });
+    const prevSteps = groups[i - 1];
+    const prevTrouble = prevSteps && (prevSteps.some((r) => r.failed) || prevSteps.at(-1)!.stalled);
+    // 只看「打算」那半句：前半句是上一步的结论，里面的「绕过上限」之类说的是 bug，不是换路
+    const turned = TURN.test(own.intent) || g.some((r) => r.acts.some((a) => /^job_kill|^kill/.test(a.name)));
+    if (turned) tags.push({ kind: 'turn', text: '换路' });
+    // 重复：同一类命令（工具名 + 命令第一个词）在这一步里跑了 3 次以上 —— 在兜圈子
+    const sig = new Map<string, number>();
+    for (const r of g) for (const a of r.acts) {
+      const key = `${a.name} ${a.brief.replace(/^cd [^;&]+[;&]+\s*/, '').split(/\s+/)[0] ?? ''}`.trim();
+      sig.set(key, (sig.get(key) ?? 0) + 1);
+    }
+    const rep = [...sig].filter(([k, n]) => n >= 3 && !/^bash (echo|cat|ls|sed|grep)$/.test(k)).sort((a, b) => b[1] - a[1])[0];
+    if (rep) tags.push({ kind: 'repeat', text: `重复 · ${rep[0]} ${rep[1]} 次` });
+    if (result && FIND.test(result)) tags.push({ kind: 'find', text: '有发现' });
+    if (result && PASS.test(result) && !FIND.test(result.replace(/没有问题/g, ''))) tags.push({ kind: 'pass', text: '通过' });
+
+    const edge: FlowStep['edge'] = prevSteps?.at(-1)?.stalled ? 'stall' : turned && prevTrouble ? 'turn' : turned ? 'turn' : 'next';
+    const edgeNote = edge === 'stall' ? `第 ${prevSteps!.at(-1)!.round} 轮后工具跑了 ${fmtDur(prevSteps!.at(-1)!.gap!)}`
+      : edge === 'turn' ? (prevTrouble ? '失败 / 卡住之后换路' : '换了做法') : null;
+
+    return {
+      n: i + 1,
+      from: first.round,
+      to: lastR.round,
+      title,
+      result,
+      callIds: g.map((r) => r.callId),
+      ms: end - first.start,
+      mix,
+      tags,
+      edge,
+      edgeNote,
+    };
+  });
+
+  const mix = empty();
+  for (const r of fr) for (const a of r.acts) mix[a.cat]++;
+  const count = (k: FlowTag['kind']) => steps.reduce((n, s) => n + s.tags.filter((x) => x.kind === k).length, 0);
+  return {
+    task: t.task ? plain(t.task.text).slice(0, 300) : null,
+    final,
+    rounds: fr,
+    steps,
+    splitBy,
+    summary: {
+      rounds: fr.length,
+      steps: steps.length,
+      ms: fr.length ? fr.at(-1)!.start + (fr.at(-1)!.ms ?? 0) : 0,
+      fails: fr.reduce((n, r) => n + r.got.filter((x) => x.failed).length, 0),
+      stalls: fr.filter((r) => r.stalled).length,
+      turns: count('turn'),
+      finds: count('find'),
+      repeats: count('repeat'),
+      mix,
+    },
+  };
+}
+
+function fmtDur(ms: number): string {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
 }

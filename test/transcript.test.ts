@@ -1,7 +1,7 @@
 // 完整记录：把一次次「整段对话」的调用还原成一条不重复的对话时间线。
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildLoopMap, buildTiming, buildTranscript, toolFailed, type TranscriptCall } from '../src/server/transcript.ts';
+import { buildFlowMap, buildLoopMap, buildTiming, buildTranscript, categorize, splitSaid, toolFailed, type TranscriptCall } from '../src/server/transcript.ts';
 
 let t = 1000;
 const call = (extra: Partial<TranscriptCall>): TranscriptCall => ({
@@ -163,4 +163,80 @@ test('失败只认框架写的退出码标记：输出正文里随口出现的�
   assert.equal(toolFailed({ text: 'Daemon process exited with code 1\n…\n[exit code: 0]' }), false);
   assert.equal(toolFailed({ text: 'Daemon process exited with code 1' }), false);
   assert.equal(toolFailed({ text: 'x', isError: true }), true);
+});
+
+// ── 详细流程图 ──
+
+
+test('动作类别：读 / 执行 / 写 / 测试，按工具名和命令判', () => {
+  const b = (command: string) => JSON.stringify({ command });
+  assert.equal(categorize('bash', b('cd /x && ls -la')), 'read');
+  assert.equal(categorize('bash', b('cat README.md')), 'read');
+  assert.equal(categorize('bash', b("cat > .qa/a.mjs <<'EOF'")), 'write');
+  assert.equal(categorize('bash', b("sed -i '' 's/a/b/' x.md")), 'write');
+  assert.equal(categorize('bash', b('cd .qa && npm test 2>&1 | tail')), 'test');
+  assert.equal(categorize('bash', b('node .qa/ui-xss.mjs')), 'exec');
+  assert.equal(categorize('write', '{"file_path":"/a"}'), 'write');
+  assert.equal(categorize('read_image', '{}'), 'read');
+  assert.equal(categorize('job_kill', '{}'), 'exec');
+  assert.equal(categorize('present', '{}'), 'other');
+});
+
+test('一句话拆成结论和打算：「单测通过。现在把 e2e 挪走」→ 结论 + 打算', () => {
+  assert.deepEqual(splitSaid('单测 180/180 通过（文档过时）。现在把 e2e 套件挪到独立端口跑。'),
+    { finding: '单测 180/180 通过（文档过时）。', intent: '现在把 e2e 套件挪到独立端口跑。' });
+  assert.deepEqual(splitSaid('先摸清环境。'), { finding: '', intent: '先摸清环境。' });
+  assert.deepEqual(splitSaid('XSS 未执行 ✅'), { finding: 'XSS 未执行 ✅', intent: '' });
+  assert.equal(splitSaid('子进程继承了 `NODE_OPTIONS`。').finding, '子进程继承了 NODE_OPTIONS。', '单词中间的下划线不能被当成强调符号去掉');
+});
+
+test('★ 详细流程图：按 agent 说的打算切步骤；结果取下一步开头的结论；卡住 / 换路 / 失败 / 重复都标出来', () => {
+  const T = 9_000_000;
+  const said = ['先看看环境。', '环境没问题。现在跑浏览器测试。', '', '测试挂住了。改用 playwright 重跑。', '', '', 'XSS 未执行 ✅。现在写报告。', '## 结论\n全部通过'];
+  const cmds = ['ls -la', 'node ui.mjs', 'node ui.mjs', 'node ui2.mjs', 'node ui2.mjs', 'node ui2.mjs', "cat > report.md <<'EOF'", ''];
+  const results = ['ok\n[exit code: 0]', 'boom\n[exit code: 1]', 'still running', 'ok\n[exit code: 0]', 'ok\n[exit code: 0]', 'ok\n[exit code: 0]', 'written', ''];
+  const starts = [0, 2000, 4000, 6000 + 60_000, 70_000, 72_000, 74_000, 76_000];
+  const msgs: any[] = [TASK];
+  const calls = said.map((s, i) => {
+    const c = call({
+      call_id: `r${i + 1}`, started_at: T + starts[i], duration_ms: 1000,
+      messages: J(msgs), response_text: s || null,
+      response_tool_calls: cmds[i] ? J([bash(`t${i}`, cmds[i])]) : null,
+    });
+    msgs.push({ role: 'assistant', content: s, ...(cmds[i] ? { toolCalls: [bash(`t${i}`, cmds[i])] } : {}) });
+    if (cmds[i]) msgs.push({ role: 'user', content: '«toolResult»', toolResults: [{ callId: `t${i}`, name: null, content: results[i] }] });
+    return c;
+  });
+  const m = buildFlowMap(buildTranscript(calls));
+  assert.equal(m.splitBy, 'said');
+  assert.deepEqual(m.steps.map((s) => [s.from, s.to]), [[1, 1], [2, 3], [4, 6], [7, 7]]);
+  assert.equal(m.steps[1].title, '现在跑浏览器测试。');
+  assert.equal(m.steps[0].result, '环境没问题。', '第 1 步的结果在第 2 步开头那句话里');
+  assert.equal(m.final?.round, 8, '最后一轮不调工具、说了话：那是结论，不算步骤');
+  const kinds = (n: number) => m.steps[n].tags.map((x) => x.kind);
+  assert.ok(kinds(1).includes('fail'), '第 2 步有命令退出码 1');
+  assert.ok(kinds(1).includes('stall') || m.steps[2].edge === 'stall', '第 3 轮后工具跑了 1 分钟');
+  assert.equal(m.steps[2].edge, 'stall');
+  assert.ok(kinds(2).includes('turn'), '「改用」= 换路');
+  assert.ok(kinds(2).includes('repeat'), '同一类命令 node 跑了 3 次');
+  assert.ok(kinds(2).includes('pass'), '第 3 步的结果「XSS 未执行 ✅」算通过');
+  assert.equal(m.steps[2].result, 'XSS 未执行 ✅。');
+  assert.equal(m.rounds[0].cat, 'read');
+  assert.equal(m.rounds[6].cat, 'write');
+  assert.equal(m.summary.fails, 1);
+  assert.equal(m.summary.stalls, 1);
+});
+
+test('从头到尾不说话的 agent：退到按动作类别变化和长空档切步骤', () => {
+  const msgs: any[] = [TASK];
+  const cmds = ['ls', 'cat a', 'node x.mjs', 'node y.mjs'];
+  const calls = cmds.map((cmd, i) => {
+    const c = call({ call_id: `s${i}`, started_at: 1000 + i * 2000, duration_ms: 500, messages: J(msgs), response_tool_calls: J([bash(`k${i}`, cmd)]) });
+    msgs.push({ role: 'assistant', content: '', toolCalls: [bash(`k${i}`, cmd)] });
+    msgs.push({ role: 'user', content: '«toolResult»', toolResults: [{ callId: `k${i}`, name: null, content: 'ok' }] });
+    return c;
+  });
+  const m = buildFlowMap(buildTranscript(calls));
+  assert.equal(m.splitBy, 'actions');
+  assert.deepEqual(m.steps.map((s) => [s.from, s.to]), [[1, 2], [3, 4]], '读的两轮一步，执行的两轮一步');
 });
