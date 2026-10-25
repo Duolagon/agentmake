@@ -22,7 +22,24 @@ npm install
 npm start          # → http://127.0.0.1:8787
 ```
 
-浏览器打开后：
+浏览器打开后，**选了才监控**：点 **「检测本机 agent」**，它列出本机正在跑的 agent，选哪个就只记哪个。
+
+| 列表里的 agent | 点「监控」会做什么 |
+|---|---|
+| Node 程序（dsh 等），没带探针 | **不重启**，让它打开调试口（SIGUSR1）、经调试协议装上探针，装完立刻关掉调试口。只记挂上之后的调用；循环插桩要在启动时装，这种挂法没有 |
+| Python 程序，没带探针 | **重启并挂上**（先确认）：结束它，用原来的命令、目录、环境变量重新起，带上探针；输出改写到 `.agentmake/logs/` |
+| 已经带着探针的（终端里手动加了 `NODE_OPTIONS` / `PYTHONPATH`） | 记下它的 pid，开始记 |
+| Codex | 读它的会话记录（见下面），选补读今天 / 3 天 / 7 天 |
+| Claude Code 等原生程序 | 列出来但接不了（读它会话记录的接入还没做） |
+
+认 agent 靠进程本身：已知的程序名（dsh、aider、Codex…），或者它所在项目的依赖里有模型 SDK（openai、@anthropic-ai/sdk、langchain…）。
+没认出来的 Node / Python 进程收在「其它进程」里，也可以直接选。不看网络连接 —— 走代理时看到的目标地址全是代理的。
+
+**没选的不记**：带着探针的进程就算连上来，事件也不落库，断点也不拦它。监控中的进程拉起的子进程跟着记；
+「停止监控」之后不再记，已经记下的保留。照「自己在终端里启动」给的命令起的（带 `AGENTMAKE_WATCH=manual`）、
+导入的项目点 ▶ 起的，都算你选的。`AGENTMAKE_RECORD_ALL=1` 回到以前那样什么都记。
+
+也可以让 AgentMake 来启动：
 
 1. 点 **「+ 导入项目」**，在目录树里选中你的工程目录
 2. 它会认出入口（`server.mjs` / `main.py` / …）并给出启动命令 —— 认错了当场改
@@ -62,11 +79,12 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/p/openai/v1     <你的启动命令>
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787/p/anthropic  <你的启动命令>
 ```
 
-### Codex：读它自己的会话记录，什么都不用配
+### Codex：读它自己的会话记录
 
 Codex 是原生程序（不是 Node / Python），挂不上探针；用 ChatGPT 账号登录时它直连 `chatgpt.com/backend-api/codex`，
 代理也接不了。但 Codex 把每次会话完整写在 `~/.codex/sessions/**/rollout-*.jsonl` 里 ——
-AgentMake 启动时补读最近一天改动过的会话，之后有新会话、新内容就接着读，只读、不碰 Codex 的配置和登录凭据。
+在「检测本机 agent」里选了 Codex 之后，补读最近几天改动过的会话，之后有新会话、新内容就接着读（AgentMake 重启后接着读），
+只读、不碰 Codex 的配置和登录凭据。没选就不读。
 
 - 一个会话 = 一个运行（历史栏里是「codex desktop · 目录」一批），里面每轮对话一条，任务就是你发的那句话
 - 一次模型回答 = 一次调用：输入是这一轮到此为止的对话，输出是它说的话和发起的工具调用（token 照 Codex 记的）。
@@ -74,9 +92,9 @@ AgentMake 启动时补读最近一天改动过的会话，之后有新会话、�
 - 子 agent（spawn_agent）和审查（guardian）挂在拉起它的那一轮下面，点开看它自己的记录
 - 只能看：Codex 不经过 AgentMake，断点、改写、重放都没有；模型想完才落盘，时序里的「模型在想」是两次落盘之间的时间
 - 不转发给 Langfuse（那是把本机所有 Codex 对话发到外面）；记录存在本机 `.agentmake/` 里，和 Codex 自己的记录一样
-- `AGENTMAKE_CODEX=0` 关掉 · `AGENTMAKE_CODEX_DAYS=3` 启动时补读最近几天（缺省 1）· `CODEX_HOME` 跟 Codex 一样
+- `CODEX_HOME` 跟 Codex 一样
 
-**它是被动监视器**：任何来源触发的运行都会自动显示 —— 你在终端手动跑、Claude Code 帮你跑、pytest 跑，都一样。
+**选中的 agent 不管谁触发都会显示**：你在终端里用它、Claude Code 帮你跑、pytest 跑，都一样。
 
 ### 三种接入方式的差别
 
@@ -393,6 +411,9 @@ docs/         架构设计
 - **`python foo.py` 时入口脚本里的循环插不上桩** —— 解释器直接编译它，不走 importlib。用 `python -m agentmake foo.py`（页面导入时会自动用这个）。被 import 的模块两种方式都能插桩
 - **Python asyncio 不保留 async stack trace** —— 并发任务的调用链比 Node 浅
 - **代理接入没有调用栈** —— 步骤按 `(模型 + system prompt 指纹)` 归并
+- **不重启挂探针只对 Node 22.12+ 有效**（要能 require ES 模块、直接跑 .ts），而且要用固定的调试端口 9229 —— 被别的调试器占着时挂不上，改用「重启并监控」。
+  挂上之后只记之后的调用，没有循环插桩
+- **重启并监控**按 `ps` 看到的命令行重新起：参数里带空格的（路径里有空格）会被拆错；原来那个终端里不会再有它的输出
 - **Codex 只能看**：读的是它写在本机的会话记录，断点 / 改写 / 重放都不支持；推理是加密的，看不到它想了什么，只看得到它说的话和做的事
 - **画布拖拽生成 agent 还没做** —— 目前是「画布定意图 + AI 写代码 + 跑完对账」的路子
 
@@ -401,7 +422,7 @@ docs/         架构设计
 ```bash
 npm start                # 调试器
 npm run dev              # 同上，带 --watch
-npm test                 # 217 条单测（Codex 会话记录接入 / 归一化 / Responses 与流式协议 / 重放指纹 / 工具调用 / 评分与规则判定 / 运行组与子进程 / 历史会话栏 / 完整记录 / 数据流与异常 / 追查 / 验证与回归 / 回写 / 循环插桩语义 / 流程推导 / 对账）
+npm test                 # 222 条单测（本机 agent 扫描与选了才记 / 不重启挂探针 / Codex 会话记录接入 / 归一化 / Responses 与流式协议 / 重放指纹 / 工具调用 / 评分与规则判定 / 运行组与子进程 / 历史会话栏 / 完整记录 / 数据流与异常 / 追查 / 验证与回归 / 回写 / 循环插桩语义 / 流程推导 / 对账）
 npm run test:e2e         # 13 个 e2e 套件，自己起 mock 和 server，跑完收摊（固定用 8787 / 8799，跑之前先停掉在用这两个端口的调试器）
 npm run test:all
 ```
@@ -426,7 +447,7 @@ Python 的 aiohttp 与 httpx 流式要设 `AGENTMAKE_PY_DEPS` 指向装了 aioht
 `run-e2e.mjs` 会先检查 8787/8799 是否被占用并**直接退出** —— 这个坑真踩过：
 端口被一个残留的旧 server 占着，整轮测试打在那个跑着旧代码的进程上，两条断言"失败"其实是假的。
 
-环境变量：`AGENTMAKE_REPLAY=<runId>` 开启重放 · `AGENTMAKE_PORT`(8787) · `AGENTMAKE_DB` · `AGENTMAKE_URL`（harness 用）· `AGENTMAKE_CHILDREN=0` 子进程不带探针 · `AGENTMAKE_CODEX=0` 不读 Codex 会话 · `AGENTMAKE_CODEX_DAYS`(1) 启动时补读几天 · `AGENTMAKE=0` 关闭拦截 · `AGENTMAKE_DEBUG=1` 打印安装错误 · `AGENTMAKE_BREAK_TIMEOUT_MS`(600000) 断点最长挂起 · `AGENTMAKE_MAX_HTTP`(5000) 单次运行记录的普通 HTTP 上限 · `AGENTMAKE_NODE_HTTP=0` 不拦 node:http · `AGENTMAKE_BODY_BYTES`(262144) 响应体最多记多少
+环境变量：`AGENTMAKE_REPLAY=<runId>` 开启重放 · `AGENTMAKE_PORT`(8787) · `AGENTMAKE_DB` · `AGENTMAKE_URL`（harness 用）· `AGENTMAKE_CHILDREN=0` 子进程不带探针 · `AGENTMAKE_RECORD_ALL=1` 不用选、什么都记（以前的被动监视）· `AGENTMAKE=0` 关闭拦截 · `AGENTMAKE_DEBUG=1` 打印安装错误 · `AGENTMAKE_BREAK_TIMEOUT_MS`(600000) 断点最长挂起 · `AGENTMAKE_MAX_HTTP`(5000) 单次运行记录的普通 HTTP 上限 · `AGENTMAKE_NODE_HTTP=0` 不拦 node:http · `AGENTMAKE_BODY_BYTES`(262144) 响应体最多记多少
 
 ### Langfuse tracing（可选）
 

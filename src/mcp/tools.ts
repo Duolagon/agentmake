@@ -352,7 +352,8 @@ export const TOOLS: Tool[] = [
     async run({ replayFrom, language, group }) {
       const h = await api('/api/health');
       // 调试器不在默认地址时，探针也得知道去哪儿报 —— 不带的话它连 8787，记录全丢
-      const target = BASE !== 'http://127.0.0.1:8787' ? `AGENTMAKE_URL=${BASE} ` : '';
+      // AGENTMAKE_WATCH=manual：照这条命令起的就是要监控的，服务端照记（没选的进程不记）
+      const target = `${BASE !== 'http://127.0.0.1:8787' ? `AGENTMAKE_URL=${BASE} ` : ''}AGENTMAKE_WATCH=manual `;
       const replay = target + (replayFrom ? `AGENTMAKE_REPLAY=${replayFrom} ` : '') + (group ? `AGENTMAKE_GROUP=${group} ` : '');
       const lang = (language ?? '').toLowerCase();
 

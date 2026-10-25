@@ -28,7 +28,11 @@ import { Gate } from './gate.ts';
 import { langfuseTracer } from './langfuse.ts';
 import { buildHistory, LOG_IDLE_MS } from './history.ts';
 import { buildFlowMap, buildLoopMap, buildTiming, buildTranscript } from './transcript.ts';
-import { startCodexWatcher } from './codex.ts';
+import { codexSessionsDir, startCodexWatcher } from './codex.ts';
+import { Acceptor, attachNode, classify, listProcs, pidOfPeer, realCtx, restartWithProbe, scan } from './agents.ts';
+import type { Watch } from './agents.ts';
+import { existsSync } from 'node:fs';
+import type { Socket } from 'node:net';
 
 /** 进程还在不在（同一台机器）。被杀掉的进程收不到 run.ended，不能一直显示「在跑」 */
 function pidAlive(pid: number): boolean {
@@ -205,6 +209,126 @@ function broadcastScores(runId: string, callId: string | null): void {
   broadcastRaw({ type: 'scores', runId, callId, failing });
 }
 
+// ── 选了才记：监控列表、上报来源 ─────────────────────────────
+//
+// 以前是被动监视器：带着探针的进程一跑就记，Codex 一启动就读。现在先扫本机在跑的 agent，
+// 用户选了哪个才记哪个（见 agents.ts）。AGENTMAKE_RECORD_ALL=1 回到以前那样什么都记。
+
+const HARNESS = {
+  node: path.resolve(HERE, '../harness/register.ts'),
+  python: path.resolve(HERE, '../pyharness'),
+  url: process.env.AGENTMAKE_PUBLIC_URL || `http://127.0.0.1:${PORT}`,
+};
+const INTERCEPT = path.resolve(HERE, '../harness/intercept.ts');
+const ROOT = path.resolve(HERE, '../..');
+
+let watchCache: Watch[] = store.listWatches();
+const activeWatches = () => watchCache.filter((w) => w.ended_at == null);
+const acceptor = new Acceptor(() => watchCache);
+function watchesChanged(): void {
+  watchCache = store.listWatches();
+  acceptor.reset();
+  broadcastRaw({ type: 'watches' });
+}
+
+/** 老版本的探针不带来源头：按连接反查进程，一条连接只查一次 */
+const peerPid = new WeakMap<Socket, Promise<number | null>>();
+async function sourceOf(req: http.IncomingMessage): Promise<{ pid: number | null; watch: string | null }> {
+  const h = req.headers;
+  const watch = typeof h['x-agentmake-watch'] === 'string' ? h['x-agentmake-watch'] : null;
+  let pid = Number(h['x-agentmake-pid']) || null;
+  if (!pid && !watch && req.socket.remotePort) {
+    let p = peerPid.get(req.socket);
+    if (!p) peerPid.set(req.socket, (p = pidOfPeer(req.socket.remotePort)));
+    pid = await p;
+  }
+  return { pid, watch };
+}
+const accepted = async (req: http.IncomingMessage) => acceptor.accepts(await sourceOf(req));
+
+// Codex：选了才读
+let stopCodex: (() => void) | null = null;
+const codexDays = (w: Watch) => {
+  try {
+    return Number(JSON.parse(w.opts ?? '{}').days) || 1;
+  } catch {
+    return 1;
+  }
+};
+function startCodex(days: number): void {
+  stopCodex?.();
+  stopCodex = startCodexWatcher({
+    // 不转发给 Langfuse：那是把本机所有 Codex 对话（常常带着用户贴进去的服务器口令）发到外面，得用户自己决定
+    record: (ev) => {
+      broadcast(store.ingest(ev), slimEvent(ev));
+      if (ev.type === 'llm.after') broadcastScores(ev.runId, ev.callId);
+    },
+    known: { call: (id) => store.hasCall(id), run: (id) => store.runEndedAt(id) },
+    log: (m) => console.log(m),
+  }, { days });
+}
+
+const newWatchId = () => `w_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+
+/** 点「监控」：按这个进程的情况挂探针 / 重启 / 记下 pid / 开始读 Codex */
+async function watchAgent(body: { pid?: number; mode?: string; codex?: boolean; days?: number }): Promise<Record<string, unknown>> {
+  if (body.codex) {
+    if (!existsSync(codexSessionsDir())) return { error: `找不到 ${codexSessionsDir()}` };
+    const days = Math.min(30, Math.max(1, Number(body.days) || 1));
+    const old = activeWatches().find((w) => w.kind === 'codex');
+    store.putWatch({ id: old?.id ?? newWatchId(), kind: 'codex', pid: null, started_at: null, label: 'Codex', detail: codexSessionsDir(),
+      cwd: null, opts: JSON.stringify({ days }), created_at: Date.now() });
+    watchesChanged();
+    startCodex(days);
+    return { ok: true };
+  }
+  const pid = Number(body.pid);
+  const p = (await listProcs()).find((x) => x.pid === pid);
+  if (!p) return { error: '这个进程已经不在了，重新扫描一下' };
+  const c = classify(p, null, realCtx(ROOT));
+  if (!c || (c.kind !== 'node' && c.kind !== 'python')) return { error: '只能监控 Node / Python 进程（Codex 走会话记录）' };
+  const id = newWatchId();
+  const put = (pid2: number, startedAt: number | null) => {
+    store.putWatch({ id, kind: 'pid', pid: pid2, started_at: startedAt, label: c.name, detail: p.args.slice(0, 400), cwd: null, opts: null, created_at: Date.now() });
+    watchesChanged();
+  };
+  if (body.mode === 'watch') {
+    put(pid, p.startedAt);
+    return { ok: true, id };
+  }
+  if (body.mode === 'attach') {
+    put(pid, p.startedAt); // 先记下，挂上之后的第一批上报才不会被挡掉
+    const r = await attachNode(pid, { intercept: INTERCEPT, url: HARNESS.url, watch: id });
+    if (!r.ok) {
+      store.endWatch(id);
+      watchesChanged();
+      return { error: r.error, canRestart: true };
+    }
+    return { ok: true, id };
+  }
+  if (body.mode === 'restart') {
+    const r = await restartWithProbe({ pid, args: p.args, kind: c.kind }, {
+      harness: HARNESS, watch: id, logDir: path.join(path.dirname(DB_FILE), 'logs'),
+    });
+    if (!r.ok) return { error: r.error };
+    put(r.pid, null); // 新进程带着监控标记，pid 只是给列表认人用
+    return { ok: true, id, pid: r.pid, log: r.log };
+  }
+  return { error: '不认识的接入方式' };
+}
+
+function unwatchAgent(id: string): Record<string, unknown> {
+  const w = activeWatches().find((x) => x.id === id);
+  if (!w) return { error: '没有这条监控' };
+  store.endWatch(id);
+  if (w.kind === 'codex') {
+    stopCodex?.();
+    stopCodex = null;
+  }
+  watchesChanged();
+  return { ok: true };
+}
+
 // ── SSE 订阅者 ─────────────────────────────────────────────
 const subscribers = new Set<http.ServerResponse>();
 
@@ -330,6 +454,11 @@ const server = http.createServer(async (req, res) => {
     // ── 语言无关的 harness 钩子：Python / Go / 任何能发 HTTP 的宿主 ──
     // 客户端只管抓栈和拦 HTTP，协议识别、归一化、指纹、断点决策全在这边做。
     if ((route === '/api/hook/before' || route === '/api/hook/after') && req.method === 'POST') {
+      // 没选要监控的进程：照常放行，什么都不记
+      if (!(await accepted(req))) {
+        await readJson(req).catch(() => null);
+        return json(res, { action: 'continue' });
+      }
       const hookCtx = {
         gate,
         record,
@@ -348,6 +477,7 @@ const server = http.createServer(async (req, res) => {
     // ── harness 上报 ──
     if (route === '/ingest' && req.method === 'POST') {
       const { events } = (await readJson(req)) as { events: AgentEvent[] };
+      if (!(await accepted(req))) return json(res, { ok: true, httpArmed: false });
       for (const ev of events ?? []) record(ev);
       // 顺带把断点状态捎回去：harness 用它决定普通 HTTP 调用要不要走闸门。
       // HTTP 调用量可能上千，全部走闸门会白白多出上千次往返。
@@ -360,6 +490,7 @@ const server = http.createServer(async (req, res) => {
         event: AgentEvent;
         phase: GatePhase;
       };
+      if (!(await accepted(req))) return json(res, { action: 'continue' });
       record(event); // 先落库广播，页面才能显示「停在哪一次调用上」
 
       const ev = event as never as {
@@ -650,6 +781,7 @@ const server = http.createServer(async (req, res) => {
     // 循环断点：和 LLM 闸门同构 —— 命中时这个响应悬着，被调试进程停在轮次边界上
     if (route === '/api/loop-gate' && req.method === 'POST') {
       const { runId: rid, loopId, iteration, armed } = (await readJson(req));
+      if (!(await accepted(req))) return json(res, {});
       loopSeen.set(loopId, { loopId, runId: rid, iteration, at: Date.now() });
       broadcastRaw({ type: 'loop.iteration', loopId, runId: rid, iteration });
 
@@ -894,6 +1026,22 @@ const server = http.createServer(async (req, res) => {
       const row = store.getCall(decodeURIComponent(route.slice('/api/calls/'.length)));
       return row ? json(res, row) : json(res, { error: 'not found' }, 404);
     }
+    // 本机正在跑的 agent：扫描、选了才监控
+    if (route === '/api/agents' && req.method === 'GET') {
+      if (url.searchParams.get('watchesOnly')) return json(res, { watches: activeWatches() });
+      const candidates = await scan({ ctx: realCtx(ROOT), harness: HARNESS, watches: watchCache, codexReadable: existsSync(codexSessionsDir()) });
+      return json(res, { candidates, watches: activeWatches() });
+    }
+    if (route === '/api/agents/watch' && req.method === 'POST') {
+      const r = await watchAgent(await readJson(req));
+      return json(res, r, r.error ? 409 : 200);
+    }
+    if (route === '/api/agents/unwatch' && req.method === 'POST') {
+      const { id } = await readJson(req);
+      const r = unwatchAgent(String(id ?? ''));
+      return json(res, r, r.error ? 404 : 200);
+    }
+
     if (route === '/api/health') {
       return json(res, {
         ok: true,
@@ -935,22 +1083,23 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
 }
 process.on('exit', () => projects.stopAll());
 
-// Codex 接入：读 ~/.codex/sessions 里的会话记录（Codex 是原生程序，挂不上探针）。AGENTMAKE_CODEX=0 关掉
-if (process.env.AGENTMAKE_CODEX !== '0') {
-  startCodexWatcher({
-    // 不转发给 Langfuse：那是把本机所有 Codex 对话（常常带着用户贴进去的服务器口令）发到外面，得用户自己决定
-    record: (ev) => {
-      broadcast(store.ingest(ev), slimEvent(ev));
-      if (ev.type === 'llm.after') broadcastScores(ev.runId, ev.callId);
-    },
-    known: { call: (id) => store.hasCall(id), run: (id) => store.runEndedAt(id) },
-    log: (m) => console.log(m),
-  });
-}
+// 监控列表里的进程重启后已经不在了（或者 pid 被别的进程复用了）：那条监控结束
+void listProcs().then((procs) => {
+  const byPid = new Map(procs.map((p) => [p.pid, p]));
+  for (const w of activeWatches()) {
+    if (w.kind !== 'pid') continue;
+    const p = w.pid != null ? byPid.get(w.pid) : undefined;
+    if (!p || (w.started_at != null && Math.abs(p.startedAt - w.started_at) > 2000)) store.endWatch(w.id);
+  }
+  watchesChanged();
+});
+// 上次选了 Codex：接着读
+const codexWatch = activeWatches().find((w) => w.kind === 'codex');
+if (codexWatch) startCodex(codexDays(codexWatch));
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`agentmake  →  http://127.0.0.1:${PORT}`);
   console.log(`db         →  ${DB_FILE}`);
-  console.log('\n浏览器打开上面的地址 → 「+ 导入项目」→ 选中工程目录 → 点 ▶ 就能跑。');
+  console.log('\n浏览器打开上面的地址 → 「检测本机 agent」→ 选要监控的那个（没选的不记）；或者「+ 导入项目」→ 点 ▶ 由我来启动。');
   console.log('要自己在终端里接入，运行  agentmake attach  看命令。\n');
 });

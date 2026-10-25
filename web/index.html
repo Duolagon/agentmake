@@ -26,8 +26,10 @@
   <button id="moreBtn" class="btn ghost" title="断点的细分阶段、规格对账、函数调用图">更多 ▾</button>
 </header>
 
-<!-- 已导入的项目：▶ 就能跑，启动命令一直摆在明面上，认错了直接改 -->
+<!-- 监控中的 agent（选了才记）+ 已导入的项目：▶ 就能跑，启动命令一直摆在明面上，认错了直接改 -->
 <div id="projWrap">
+  <div id="watchBar" class="watchbar"></div>
+  <button id="scanAgents" class="btn">检测本机 agent</button>
   <div id="projBar" hidden></div>
   <button id="addProject" class="btn ghost">+ 导入项目</button>
 </div>
@@ -115,7 +117,10 @@
     <div id="empty" class="empty">
       <p class="bigline" id="emptyTitle">先导入一个项目</p>
       <p class="hint" id="emptyHint">选中你的工程目录，我会认出入口并加上探针 —— <b>你的代码一行都不用改</b>。</p>
-      <button id="addProject2" class="btn primary big">+ 导入项目</button>
+      <div class="emptybtns">
+        <button id="scanAgents2" class="btn primary big">检测本机 agent</button>
+        <button id="addProject2" class="btn big">+ 导入项目</button>
+      </div>
 
       <details class="manual">
         <summary>或者自己在终端里启动</summary>
@@ -199,6 +204,21 @@
         <button id="pkCancel" class="btn">取消</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- 本机正在跑的 agent：选哪个就只记哪个（agents.js） -->
+<div id="agentPicker" hidden>
+  <div class="pkbox agbox">
+    <div class="pkhead">
+      <strong>本机正在运行的 agent</strong>
+      <span id="agSum" class="hint"></span>
+      <span class="spacer"></span>
+      <button id="agRescan" class="btn">重新扫描</button>
+      <button id="agClose" class="btn ghost">✕</button>
+    </div>
+    <div id="agList" class="aglist"></div>
+    <div class="agfoot hint">选了「监控」的才记录；没选的进程就算带着探针连上来，也不落库。停止监控后已经记下的保留。</div>
   </div>
 </div>
 

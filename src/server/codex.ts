@@ -349,13 +349,13 @@ export function codexSessionsDir(): string {
 }
 
 /**
- * 开始跟随：先补读最近 N 天（AGENTMAKE_CODEX_DAYS，缺省 1）改动过的会话，之后有新会话或新内容就接着读。
+ * 开始跟随（用户在「本机 agent」里选了 Codex 才调）：先补读最近 N 天改动过的会话，之后有新会话或新内容就接着读。
  * 只读不写，读不到就安静地什么都不做。返回停止函数。
  */
 export function startCodexWatcher(deps: CodexWatcherDeps, opts: { dir?: string; days?: number; pollMs?: number } = {}): () => void {
   const dir = opts.dir ?? codexSessionsDir();
   if (!existsSync(dir)) return () => {};
-  const since = Date.now() - (opts.days ?? Number(process.env.AGENTMAKE_CODEX_DAYS ?? 1)) * 86_400_000;
+  const since = Date.now() - (opts.days ?? 1) * 86_400_000;
   const files = new Map<string, { thread: CodexThread; offset: number; rest: string }>();
 
   const pump = (file: string) => {

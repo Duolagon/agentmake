@@ -62,6 +62,10 @@ def _request(method: str, path: str, payload: Optional[dict], timeout: float) ->
     try:
         conn = _HTTPConnection(_HOST, _PORT, timeout=timeout)
         headers = {"content-type": "application/json"} if body is not None else {}
+        # 带上「我是谁」：服务端只记用户选了要监控的进程
+        headers["x-agentmake-pid"] = str(os.getpid())
+        if os.environ.get("AGENTMAKE_WATCH"):
+            headers["x-agentmake-watch"] = os.environ["AGENTMAKE_WATCH"]
         conn.request(method, _BASE_PATH + path, body=body, headers=headers)
         resp = conn.getresponse()
         raw = resp.read()

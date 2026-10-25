@@ -12,6 +12,7 @@ import { initCompare, loadCompare, refreshCompare } from './compare.js';
 import { initVerify, loadVerify, noteRegress, progName } from './verify.js';
 import { initSpec, loadSpec, flowAnnotations } from './spec.js';
 import { initProjects, noteProcEvent } from './projects.js';
+import { initAgents, noteWatchEvent, watchCount } from './agents.js';
 import { initHistory, loadHistory, renderHistory, scheduleHistory } from './history.js';
 import { focusCall, initTranscript, refreshTranscript, setTranscriptFilter, showTranscript } from './transcript.js';
 import { initTiming, loadTiming, markTiming, refreshTiming, setTimingFilter } from './timing.js';
@@ -148,6 +149,10 @@ function applyEvent(ev) {
 
     case 'breakpoints':
       syncBpUI(ev);
+      break;
+
+    case 'watches':
+      noteWatchEvent();
       break;
 
     case 'proc.log':
@@ -520,11 +525,12 @@ function initAttach(health) {
 
   const RECIPES = {
     node: {
-      cmd: `NODE_OPTIONS="--import ${node}" \\\n  node your-app.mjs`,
+      // AGENTMAKE_WATCH=manual：照这条命令起的就是你选了要监控的，服务端照记（没选的不记）
+      cmd: `AGENTMAKE_WATCH=manual NODE_OPTIONS="--import ${node}" \\\n  node your-app.mjs`,
       note: '完整能力：断点、改 prompt、调用栈、循环实时控制、重放。',
     },
     python: {
-      cmd: `PYTHONPATH="${py}" \\\n  python your_agent.py\n\n# 入口脚本里的循环也要实时控制时：\nPYTHONPATH="${py}" \\\n  python -m agentmake your_agent.py`,
+      cmd: `AGENTMAKE_WATCH=manual PYTHONPATH="${py}" \\\n  python your_agent.py\n\n# 入口脚本里的循环也要实时控制时：\nAGENTMAKE_WATCH=manual PYTHONPATH="${py}" \\\n  python -m agentmake your_agent.py`,
       note: '和 Node 同等能力。httpx / requests / urllib 都拦得到，不用装包。',
     },
     other: {
@@ -711,10 +717,22 @@ function renderEmpty() {
         ? `<b>${esc(progName(sel))}</b> 已经结束，全程没有调模型、也没有发 HTTP 请求。如果它只是个包装进程（npm / shell），真正干活的在它下面挂着的子进程里。`
         : `<b>${esc(progName(sel))}</b> 正在跑，它一调模型或抓数据，这里就会出现。也可以先点右上角「停在下一次模型调用」把它拦下来。`;
     $('addProject2').hidden = true;
+    $('scanAgents2').hidden = true;
     return;
   }
   const running = knownProjects.some((p) => p.proc?.running);
   const has = knownProjects.length > 0;
+  $('scanAgents2').hidden = false;
+  if (!has) {
+    // 选了才记：先让人挑要监控的 agent；也可以导入项目由我们来启动
+    const watching = watchCount();
+    $('emptyTitle').textContent = watching ? '在监控了，等它调模型' : '先选要监控的 agent';
+    $('emptyHint').innerHTML = watching
+      ? '选中的 agent 一调模型或抓数据，左边就会出现。要再加一个，点「检测本机 agent」。'
+      : '扫一遍本机正在跑的 agent（dsh、Codex、你自己的 Node / Python 程序），<b>选哪个就只记哪个</b>。也可以导入项目，由我来启动。';
+    $('addProject2').hidden = false;
+    return;
+  }
   $('emptyTitle').textContent = !has
     ? '先导入一个项目'
     : running
@@ -1185,6 +1203,7 @@ async function boot() {
   initVerify({ showDiff, showCall: showDetail, runs: () => runs });
   initSpec({ changed: () => loadGraph() });
   initProjects({ changed: (ps) => { knownProjects = ps; renderList(); } });
+  initAgents({ changed: () => renderList() });
 
   const health = await fetch('/api/health').then((r) => r.json()).catch(() => ({}));
   initAttach(health);

@@ -7,7 +7,7 @@
 //
 // 这三个都是**运行中**生效，不需要改代码、不需要重跑。
 
-import { endpoint, isDisabled, rawFetch } from './transport.ts';
+import { endpoint, isDisabled, rawFetch, sourceHeaders } from './transport.ts';
 import { emit } from './transport.ts';
 
 export type LoopOverride = {
@@ -121,7 +121,7 @@ export async function loopEnter(id: string, endLine = 0): Promise<'continue' | '
     // 没断点时立即返回，只是顺带把最新覆写带回来。
     const res = await rawFetch()(`${endpoint()}/api/loop-gate`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...sourceHeaders() },
       body: JSON.stringify({ runId: runIdOf(), loopId: id, iteration: s.iter, armed: !!o.breakpoint }),
       signal: AbortSignal.timeout(600_000),
     });

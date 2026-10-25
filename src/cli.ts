@@ -29,7 +29,8 @@ switch (cmd) {
     // 调试器不在默认端口时（AGENTMAKE_PORT / AGENTMAKE_URL），命令里必须带上 AGENTMAKE_URL ——
     // 否则探针按缺省连 8787，记录要么丢了，要么报到另一个实例里去
     const url = (process.env.AGENTMAKE_URL || `http://127.0.0.1:${process.env.AGENTMAKE_PORT || 8787}`).replace(/\/$/, '');
-    const target = url === 'http://127.0.0.1:8787' ? '' : `AGENTMAKE_URL=${url} `;
+    // AGENTMAKE_WATCH=manual：照这条命令起的就是要监控的，服务端照记（没选的进程不记）
+    const target = `${url === 'http://127.0.0.1:8787' ? '' : `AGENTMAKE_URL=${url} `}AGENTMAKE_WATCH=manual `;
     console.log('在你的项目目录下执行（代码一行不改）：\n');
     console.log(`  Node:    ${target}NODE_OPTIONS="--import ${path.join(HERE, 'harness/register.ts')}" node your-app.mjs`);
     console.log(`  Python:  ${target}PYTHONPATH="${path.join(HERE, 'pyharness')}" python -m agentmake your_agent.py`);

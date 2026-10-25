@@ -12,6 +12,7 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { HistoryRun, RunStats } from './history.ts';
 import type { TranscriptCall } from './transcript.ts';
+import type { Watch } from './agents.ts';
 import type { AgentEvent, HttpBody, HttpCall, LLMAfter, LLMBefore, LLMPatched, RunStarted } from '../shared/types.ts';
 import { checkCall, type RuleInput } from './rules.ts';
 
@@ -182,6 +183,20 @@ export class Store {
         cmd        TEXT NOT NULL,
         trigger    TEXT,
         created_at INTEGER NOT NULL
+      );
+
+      -- 用户选了要监控的 agent：一个进程（pid + 启动时间，防 pid 复用）或者 Codex。没选的不记录
+      CREATE TABLE IF NOT EXISTS watches (
+        id         TEXT PRIMARY KEY,
+        kind       TEXT NOT NULL,       -- pid | codex
+        pid        INTEGER,
+        started_at INTEGER,
+        label      TEXT NOT NULL,
+        detail     TEXT,
+        cwd        TEXT,
+        opts       TEXT,
+        created_at INTEGER NOT NULL,
+        ended_at   INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS calls (
@@ -1012,6 +1027,25 @@ export class Store {
       }
     }
     return out;
+  }
+
+  // ── 监控列表 ──────────────────────────────────────────────
+
+  listWatches(): Watch[] {
+    return this.db.prepare('SELECT * FROM watches ORDER BY created_at').all() as Watch[];
+  }
+
+  putWatch(w: Omit<Watch, 'ended_at'>): void {
+    this.db
+      .prepare(`INSERT INTO watches (id, kind, pid, started_at, label, detail, cwd, opts, created_at, ended_at)
+                VALUES (?,?,?,?,?,?,?,?,?,NULL)
+                ON CONFLICT(id) DO UPDATE SET pid=excluded.pid, started_at=excluded.started_at, label=excluded.label,
+                  detail=excluded.detail, cwd=excluded.cwd, opts=excluded.opts, ended_at=NULL`)
+      .run(w.id, w.kind, w.pid, w.started_at, w.label, w.detail, w.cwd, w.opts, w.created_at);
+  }
+
+  endWatch(id: string, at = Date.now()): void {
+    this.db.prepare('UPDATE watches SET ended_at=? WHERE id=? AND ended_at IS NULL').run(at, id);
   }
 
   // ── 项目 ──────────────────────────────────────────────────

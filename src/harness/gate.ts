@@ -8,7 +8,7 @@
 // 无法把「暂停的是哪一次调用」对应起来。合并成一个请求，顺序问题自然消失。
 
 import type { RequestPatch } from '../shared/denormalize.ts';
-import { endpoint, isDisabled, rawFetch } from './transport.ts';
+import { endpoint, isDisabled, rawFetch, sourceHeaders } from './transport.ts';
 
 export type GatePhase = 'llm.before' | 'llm.after' | 'http.before' | 'http.after';
 
@@ -29,7 +29,7 @@ export async function gate(phase: GatePhase, event: unknown): Promise<GateDecisi
   try {
     const res = await rawFetch()(`${endpoint()}/api/gate`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...sourceHeaders() },
       body: JSON.stringify({ event, phase }),
       signal: AbortSignal.timeout(HOLD_MS),
     });

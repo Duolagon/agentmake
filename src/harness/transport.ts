@@ -68,7 +68,7 @@ function flush(): Promise<void> {
     .then(() =>
       fetchRaw(`${ENDPOINT}/ingest`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...sourceHeaders() },
         body: JSON.stringify({ events: batch }),
         signal: AbortSignal.timeout(2000),
       }),
@@ -111,6 +111,15 @@ export function setRawFetch(f: typeof fetch): void {
 export function rawFetch(): typeof fetch {
   return fetchRaw;
 }
+/**
+ * 每次上报都带上「我是谁」：服务端只记用户选了要监控的进程（见 server/agents.ts 的 Acceptor）。
+ * 监控标记每次现读 —— 不重启挂上探针时，标记是装探针那一刻才设进来的
+ */
+export function sourceHeaders(): Record<string, string> {
+  const w = process.env.AGENTMAKE_WATCH;
+  return { 'x-agentmake-pid': String(process.pid), ...(w ? { 'x-agentmake-watch': w } : {}) };
+}
+
 export function endpoint(): string {
   return ENDPOINT;
 }

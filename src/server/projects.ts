@@ -162,7 +162,8 @@ export function start(
   if (procs.has(p.id)) return { ok: false, error: '已经在跑了' };
   if (!p.cmd.trim()) return { ok: false, error: '还没填启动命令' };
 
-  const extra: Record<string, string> = { AGENTMAKE_URL: env.url };
+  // 导入的项目是用户亲手点 ▶ 跑的：带上项目标记，服务端照记（没选的进程不记，见 agents.ts）
+  const extra: Record<string, string> = { AGENTMAKE_URL: env.url, AGENTMAKE_WATCH: `project:${p.id}` };
   if (p.kind === 'python') {
     // 保留用户原有的 PYTHONPATH，别把人家的依赖路径挤掉
     extra.PYTHONPATH = process.env.PYTHONPATH
