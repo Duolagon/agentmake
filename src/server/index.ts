@@ -26,8 +26,9 @@ import { analyze } from './writability.ts';
 import { applyEdit, applyEdits, backupOf, revert } from './patch.ts';
 import { Gate } from './gate.ts';
 import { langfuseTracer } from './langfuse.ts';
-import { buildHistory } from './history.ts';
+import { buildHistory, LOG_IDLE_MS } from './history.ts';
 import { buildFlowMap, buildLoopMap, buildTiming, buildTranscript } from './transcript.ts';
+import { startCodexWatcher } from './codex.ts';
 
 /** 进程还在不在（同一台机器）。被杀掉的进程收不到 run.ended，不能一直显示「在跑」 */
 function pidAlive(pid: number): boolean {
@@ -598,7 +599,10 @@ const server = http.createServer(async (req, res) => {
       // 不看请求级运行有没有结束 —— dsh 这类服务收到一轮对话的请求就先回了，agent 在后台接着跑
       const run = store.getRun(runId) as { ended_at?: number | null; parent_run_id?: string | null; pid?: number | null } | undefined;
       const proc = run?.parent_run_id ? (store.getRun(run.parent_run_id) as typeof run) : run;
-      const live = !!proc && proc.ended_at == null && proc.pid != null && pidAlive(proc.pid);
+      const lastAt = Math.max(...calls.map((c) => (c.started_at ?? 0) + (c.duration_ms ?? 0)));
+      const live = !!proc && proc.ended_at == null && (proc.pid != null ? pidAlive(proc.pid)
+        // 没有进程可查（读会话记录接入的 Codex）：这一轮没结束、最近还在写
+        : run?.ended_at == null && Date.now() - lastAt < LOG_IDLE_MS);
       return json(res, buildTiming(buildTranscript(calls), { live, now: Date.now() }));
     }
     // 历史：按「一次干活」列，带任务原文和结果，给人找「上次那一次」用（见 history.ts）
@@ -930,6 +934,19 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   });
 }
 process.on('exit', () => projects.stopAll());
+
+// Codex 接入：读 ~/.codex/sessions 里的会话记录（Codex 是原生程序，挂不上探针）。AGENTMAKE_CODEX=0 关掉
+if (process.env.AGENTMAKE_CODEX !== '0') {
+  startCodexWatcher({
+    // 不转发给 Langfuse：那是把本机所有 Codex 对话（常常带着用户贴进去的服务器口令）发到外面，得用户自己决定
+    record: (ev) => {
+      broadcast(store.ingest(ev), slimEvent(ev));
+      if (ev.type === 'llm.after') broadcastScores(ev.runId, ev.callId);
+    },
+    known: { call: (id) => store.hasCall(id), run: (id) => store.runEndedAt(id) },
+    log: (m) => console.log(m),
+  });
+}
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`agentmake  →  http://127.0.0.1:${PORT}`);

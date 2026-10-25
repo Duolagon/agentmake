@@ -80,7 +80,8 @@ for (const [port, what] of [[8799, 'mock-llm'], [8787, 'debugger server']]) {
 }
 
 start('test/mock-llm.ts', {});
-start('src/server/index.ts', { AGENTMAKE_DB: DB });
+// 不读本机真实的 Codex 会话：测试库里只该有测试自己产生的运行
+start('src/server/index.ts', { AGENTMAKE_DB: DB, AGENTMAKE_CODEX: '0' });
 
 if (!(await waitUp('http://127.0.0.1:8799/__count')) || !(await waitUp('http://127.0.0.1:8787/api/health'))) {
   console.error('mock 或 server 没起来');

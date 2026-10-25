@@ -64,7 +64,8 @@ export function checkCall(c: RuleInput): RuleHit[] {
   }
 
   // 流式响应目前只标记不解析，正文本来就是空的 —— 不能据此判「什么都没说」
-  if (!text && calls.length === 0 && !c.streaming) {
+  // reasoning_only：Codex 的模型只想了一下、什么都没发（在等后台的子 agent / 异步结果回来）—— 那是正常的让出，不是空输出
+  if (!text && calls.length === 0 && !c.streaming && c.finish_reason !== 'reasoning_only') {
     hits.push({ name: 'rule.empty_output', comment: '模型既没有输出文本，也没有调用工具' });
   }
 

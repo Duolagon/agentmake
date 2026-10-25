@@ -62,6 +62,20 @@ OPENAI_BASE_URL=http://127.0.0.1:8787/p/openai/v1     <你的启动命令>
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787/p/anthropic  <你的启动命令>
 ```
 
+### Codex：读它自己的会话记录，什么都不用配
+
+Codex 是原生程序（不是 Node / Python），挂不上探针；用 ChatGPT 账号登录时它直连 `chatgpt.com/backend-api/codex`，
+代理也接不了。但 Codex 把每次会话完整写在 `~/.codex/sessions/**/rollout-*.jsonl` 里 ——
+AgentMake 启动时补读最近一天改动过的会话，之后有新会话、新内容就接着读，只读、不碰 Codex 的配置和登录凭据。
+
+- 一个会话 = 一个运行（历史栏里是「codex desktop · 目录」一批），里面每轮对话一条，任务就是你发的那句话
+- 一次模型回答 = 一次调用：输入是这一轮到此为止的对话，输出是它说的话和发起的工具调用（token 照 Codex 记的）。
+  流程、时序、完整记录、循环图都能看；`exec` 里的命令按读 / 跑 / 写 / 测试归类，`"exit_code":N` 不为 0 算失败
+- 子 agent（spawn_agent）和审查（guardian）挂在拉起它的那一轮下面，点开看它自己的记录
+- 只能看：Codex 不经过 AgentMake，断点、改写、重放都没有；模型想完才落盘，时序里的「模型在想」是两次落盘之间的时间
+- 不转发给 Langfuse（那是把本机所有 Codex 对话发到外面）；记录存在本机 `.agentmake/` 里，和 Codex 自己的记录一样
+- `AGENTMAKE_CODEX=0` 关掉 · `AGENTMAKE_CODEX_DAYS=3` 启动时补读最近几天（缺省 1）· `CODEX_HOME` 跟 Codex 一样
+
 **它是被动监视器**：任何来源触发的运行都会自动显示 —— 你在终端手动跑、Claude Code 帮你跑、pytest 跑，都一样。
 
 ### 三种接入方式的差别
@@ -71,6 +85,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787/p/anthropic  <你的启动命令>
 | Node harness | ✅ | ✅ | ✅ |
 | Python harness | ✅ | ✅ | ✅ |
 | 代理（任何语言） | ✅ | ❌ 按 system prompt 归并成步骤 | ❌ |
+| Codex（读会话记录） | 只能看 | ❌ 按它说的话切步骤 | ❌ |
 
 ## 现在能做什么
 
@@ -378,6 +393,7 @@ docs/         架构设计
 - **`python foo.py` 时入口脚本里的循环插不上桩** —— 解释器直接编译它，不走 importlib。用 `python -m agentmake foo.py`（页面导入时会自动用这个）。被 import 的模块两种方式都能插桩
 - **Python asyncio 不保留 async stack trace** —— 并发任务的调用链比 Node 浅
 - **代理接入没有调用栈** —— 步骤按 `(模型 + system prompt 指纹)` 归并
+- **Codex 只能看**：读的是它写在本机的会话记录，断点 / 改写 / 重放都不支持；推理是加密的，看不到它想了什么，只看得到它说的话和做的事
 - **画布拖拽生成 agent 还没做** —— 目前是「画布定意图 + AI 写代码 + 跑完对账」的路子
 
 ## 开发
@@ -385,7 +401,7 @@ docs/         架构设计
 ```bash
 npm start                # 调试器
 npm run dev              # 同上，带 --watch
-npm test                 # 211 条单测（归一化 / Responses 与流式协议 / 重放指纹 / 工具调用 / 评分与规则判定 / 运行组与子进程 / 历史会话栏 / 完整记录 / 数据流与异常 / 追查 / 验证与回归 / 回写 / 循环插桩语义 / 流程推导 / 对账）
+npm test                 # 217 条单测（Codex 会话记录接入 / 归一化 / Responses 与流式协议 / 重放指纹 / 工具调用 / 评分与规则判定 / 运行组与子进程 / 历史会话栏 / 完整记录 / 数据流与异常 / 追查 / 验证与回归 / 回写 / 循环插桩语义 / 流程推导 / 对账）
 npm run test:e2e         # 13 个 e2e 套件，自己起 mock 和 server，跑完收摊（固定用 8787 / 8799，跑之前先停掉在用这两个端口的调试器）
 npm run test:all
 ```
@@ -410,7 +426,7 @@ Python 的 aiohttp 与 httpx 流式要设 `AGENTMAKE_PY_DEPS` 指向装了 aioht
 `run-e2e.mjs` 会先检查 8787/8799 是否被占用并**直接退出** —— 这个坑真踩过：
 端口被一个残留的旧 server 占着，整轮测试打在那个跑着旧代码的进程上，两条断言"失败"其实是假的。
 
-环境变量：`AGENTMAKE_REPLAY=<runId>` 开启重放 · `AGENTMAKE_PORT`(8787) · `AGENTMAKE_DB` · `AGENTMAKE_URL`（harness 用）· `AGENTMAKE_CHILDREN=0` 子进程不带探针 · `AGENTMAKE=0` 关闭拦截 · `AGENTMAKE_DEBUG=1` 打印安装错误 · `AGENTMAKE_BREAK_TIMEOUT_MS`(600000) 断点最长挂起 · `AGENTMAKE_MAX_HTTP`(5000) 单次运行记录的普通 HTTP 上限 · `AGENTMAKE_NODE_HTTP=0` 不拦 node:http · `AGENTMAKE_BODY_BYTES`(262144) 响应体最多记多少
+环境变量：`AGENTMAKE_REPLAY=<runId>` 开启重放 · `AGENTMAKE_PORT`(8787) · `AGENTMAKE_DB` · `AGENTMAKE_URL`（harness 用）· `AGENTMAKE_CHILDREN=0` 子进程不带探针 · `AGENTMAKE_CODEX=0` 不读 Codex 会话 · `AGENTMAKE_CODEX_DAYS`(1) 启动时补读几天 · `AGENTMAKE=0` 关闭拦截 · `AGENTMAKE_DEBUG=1` 打印安装错误 · `AGENTMAKE_BREAK_TIMEOUT_MS`(600000) 断点最长挂起 · `AGENTMAKE_MAX_HTTP`(5000) 单次运行记录的普通 HTTP 上限 · `AGENTMAKE_NODE_HTTP=0` 不拦 node:http · `AGENTMAKE_BODY_BYTES`(262144) 响应体最多记多少
 
 ### Langfuse tracing（可选）
 

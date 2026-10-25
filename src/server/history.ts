@@ -103,6 +103,10 @@ const SESSION_GAP_MS = 10 * 60 * 1000;
 
 const EMPTY: RunStats = { llm: 0, tool: 0, tokensIn: 0, tokensOut: 0, errors: 0, pending: 0, firstAt: null, lastAt: null, models: null };
 
+/** 没有进程可查的运行（读会话记录接入的 Codex）：多久没有新调用就不再算「在跑」。
+    Codex 一次回答要等它想完才落盘，中间可能隔好几分钟 */
+export const LOG_IDLE_MS = 10 * 60_000;
+
 export function programName(r: { argv: string | null; cwd: string | null; run_id: string }): string {
   let argv: unknown = [];
   try {
@@ -124,8 +128,16 @@ export function programName(r: { argv: string | null; cwd: string | null; run_id
  */
 const INJECTED = /(Current runtime context|<system-reminder>|<environment_details>|<env>|<context>|<user-context>)/;
 
-/** 把用户消息拆成「人写的那句」和「框架拼在后面的运行时上下文」 */
+const LEADING = /^\s*(?:<([\w-]+)[^>]*>[\s\S]*?<\/\1>\s*)+(?:#+\s*My request:\s*)?/i;
+
+/** 把用户消息拆成「人写的那句」和「框架拼在前后的运行时上下文」 */
 export function splitInjected(text: string): { main: string; context: string | null } {
+  // 拼在前面的界面状态块：Codex 的「<in-app-browser-context …>…</in-app-browser-context>## My request:」
+  const lead = LEADING.exec(text);
+  if (lead && lead[0].length < text.length) {
+    const rest = splitInjected(text.slice(lead[0].length));
+    return { main: rest.main, context: [lead[0].trim(), rest.context].filter(Boolean).join('\n\n') };
+  }
   const m = INJECTED.exec(text);
   if (!m || m.index === 0) return { main: text, context: null };
   return { main: text.slice(0, m.index).trimEnd(), context: text.slice(m.index) };
@@ -133,9 +145,7 @@ export function splitInjected(text: string): { main: string; context: string | n
 
 export function cleanTask(text: string | null | undefined, max = 140): string | null {
   if (!text) return null;
-  let t = String(text);
-  const m = INJECTED.exec(t);
-  if (m && m.index > 0) t = t.slice(0, m.index);
+  let t = splitInjected(String(text)).main;
   t = t.replace(/\s+/g, ' ').trim();
   if (!t) return null;
   return t.length > max ? `${t.slice(0, max)}…` : t;
@@ -224,8 +234,10 @@ export function buildHistory(input: {
     // 只看 run.ended 不够：dsh 这类服务收到一轮对话的请求就先回了，agent 在后台接着跑；
     // 反过来，长连接的请求一直不结束，却早就不干活了
     const procAlive = procEnded == null && pid != null && alive(pid);
-    const live = procAlive && (s.pending > 0 || (s.lastAt != null && input.now - s.lastAt < 15_000) ||
-      (r.kind !== 'request' && r.ended_at == null));
+    const live = procAlive ? (s.pending > 0 || (s.lastAt != null && input.now - s.lastAt < 15_000) ||
+      (r.kind !== 'request' && r.ended_at == null))
+      // 读会话记录接入的（Codex）没有进程可查：这一轮没结束、最近还在写，就算在跑
+      : pid == null && r.ended_at == null && s.lastAt != null && input.now - s.lastAt < LOG_IDLE_MS;
     const fail = failing.get(r.run_id) ?? 0;
     // 「中断」只算进程没了的时候还有调用没回来的 —— 一轮对话早就跑完、只是后来进程被关掉
     // （收不到 run.ended）的，照实说完成

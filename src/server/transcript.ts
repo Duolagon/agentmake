@@ -366,8 +366,14 @@ export function argBrief(args: string): string {
   try {
     const o = JSON.parse(args);
     if (o && typeof o === 'object') {
-      for (const k of ['command', 'cmd', 'path', 'file_path', 'query', 'q', 'url', 'pattern', 'job_id', 'description']) {
+      for (const k of ['command', 'cmd', 'path', 'file_path', 'query', 'q', 'url', 'pattern', 'job_id', 'description', 'title']) {
         if (typeof o[k] === 'string') return o[k].replace(/\s+/g, ' ').slice(0, 80);
+      }
+      // Codex 的 exec 工具参数是一段 JS：await tools.exec_command({cmd:"rg -n …"}) —— 抠出里面的命令
+      const code = typeof o.input === 'string' ? o.input : typeof o.code === 'string' ? o.code : null;
+      if (code) {
+        const m = /\bcmd\s*:\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/.exec(code);
+        return (m ? m[2].replace(/\\(.)/g, '$1') : code).replace(/\s+/g, ' ').slice(0, 80);
       }
     }
   } catch {
@@ -426,8 +432,11 @@ export type LoopMap = {
  */
 export function toolFailed(r: { text: string; isError?: boolean }): boolean {
   if (r.isError) return true;
-  const codes = [...r.text.matchAll(/\[exit code:\s*(-?\d+)\]/gi)];
-  return codes.length > 0 && Number(codes.at(-1)![1]) !== 0;
+  // Codex 的工具输出：脚本本身挂了是「Script failed / Script error」开头，命令的退出码在 JSON 的 "exit_code":N 里
+  if (/^Script (failed|error)\b/.test(r.text)) return true;
+  const codes = [...r.text.matchAll(/\[exit code:\s*(-?\d+)\]|\\?"exit_code\\?"\s*:\s*(-?\d+)/gi)];
+  const last = codes.at(-1);
+  return !!last && Number(last[1] ?? last[2]) !== 0;
 }
 
 export function buildLoopMap(t: Transcript): LoopMap {
@@ -523,15 +532,16 @@ export function categorize(name: string, args: string): ActionCat {
   const n = name.toLowerCase();
   if (/^(write|edit|str_replace|apply_patch|create_file|multi_edit|notebook_edit)/.test(n)) return 'write';
   if (/^(read|read_image|glob|grep|ls|list|search|view|open_file|fetch|web_fetch|web_search)/.test(n)) return 'read';
-  if (/^(job_|kill|run|exec)/.test(n)) return 'exec';
   let cmd = '';
   try {
     const o = JSON.parse(args);
     cmd = typeof o?.command === 'string' ? o.command : typeof o?.cmd === 'string' ? o.cmd : '';
+    // Codex 的 exec：参数是一段 JS，命令在 tools.exec_command({cmd:"…"}) 里
+    if (!cmd && typeof o?.input === 'string') cmd = /\bcmd\s*:\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1/.exec(o.input)?.[2] ?? '';
   } catch {
     cmd = /"(?:command|cmd)"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(args)?.[1] ?? '';
   }
-  if (!cmd) return n === 'bash' || n === 'shell' || n === 'terminal' ? 'exec' : 'other';
+  if (!cmd) return /^(job_|kill|run|exec)/.test(n) || n === 'bash' || n === 'shell' || n === 'terminal' ? 'exec' : 'other';
   if (/(^|[;&|]\s*)(npm (run )?test|npm run test|node --test|pytest|go test|cargo test|jest|vitest|mocha)\b|\be2e\b/.test(cmd)) return 'test';
   if (/cat\s*>|\btee\b|sed -i|python3? - <<|>\s*[\w./-]+\.(m?[jt]s|py|md|json|ya?ml|txt|sh)\b|\bmkdir\b|\bcp\b|\bmv\b|\brm\b/.test(cmd)) return 'write';
   if (/^\s*(cd [^;&]+[;&]+\s*)?(ls|cat|head|tail|sed -n|grep|rg|find|wc|lsof|ps|git (status|log|diff|show|rev-parse)|echo '?=+|pwd|which|stat|du)\b/.test(cmd)) return 'read';

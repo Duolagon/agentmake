@@ -816,6 +816,17 @@ export class Store {
     return rows;
   }
 
+  /** 这次调用入过库没有 —— 读会话记录接入（Codex）重启后重读同一个文件时，已有的不再发 */
+  hasCall(callId: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM calls WHERE call_id=?').get(callId);
+  }
+
+  /** 这次运行在库里的状态：undefined 没有 · null 有、还没结束 · 数字 = 结束时间 */
+  runEndedAt(runId: string): number | null | undefined {
+    const r = this.db.prepare('SELECT ended_at FROM runs WHERE run_id=?').get(runId) as { ended_at: number | null } | undefined;
+    return r ? r.ended_at : undefined;
+  }
+
   getCall(callId: string): unknown {
     const c = this.db.prepare('SELECT * FROM calls WHERE call_id=?').get(callId) as Record<string, unknown> | undefined;
     // 同 ERROR_COL：成功且收到结束信号的，残留的「aborted」不算错误
