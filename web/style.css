@@ -1194,60 +1194,69 @@ main:has(#breakPane:not([hidden])) #detailPane { display: none; }
 @keyframes trFlash { 0%, 20% { background: color-mix(in srgb, var(--accent) 22%, transparent); } }
 
 /* ══════ 循环图（agent 循环的流程）══════
-   左：任务 → 中：模型 → 右：它用过的工具（越粗调得越多）→ 结论。点工具只亮它的那几轮 */
-.lm { position: relative; padding: 14px 16px 20px; min-height: 100%; }
-.lm-wires { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
-.lm-wires .w { fill: none; stroke: color-mix(in srgb, var(--text-dim) 45%, transparent); stroke-width: 1.5px; }
-.lm-wires .w.tool { stroke: color-mix(in srgb, var(--accent) 45%, transparent); }
-.lm-wires .w.tool.bad { stroke: color-mix(in srgb, var(--err) 55%, transparent); }
-.lm-wires .w.tool.on { stroke: var(--accent); }
-.lm-wires .w.fin { stroke: color-mix(in srgb, var(--ok) 55%, transparent); stroke-dasharray: 4 3; }
-.lm-grid { position: relative; z-index: 1; display: grid; grid-template-columns: minmax(110px, 0.8fr) minmax(130px, 0.9fr) minmax(200px, 1.6fr); gap: 14px 40px; align-items: start; }
-.lm-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.lm-mid { padding-top: 6px; }
-.lm-node {
-  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-raised); padding: 9px 11px; cursor: pointer;
-  box-shadow: 0 1px 2px rgb(0 0 0 / .04);
+   从上往下：任务 → 模型 ⇄ 工具 → 结论。不画曲线，只靠对齐、留白和一种强调色 */
+.lm { max-width: 620px; margin: 0 auto; padding: 16px 18px 24px; display: flex; flex-direction: column; }
+.lm-box {
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg-raised); padding: 10px 14px;
 }
-.lm-node:hover, .lm-tool:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-.lm-k { font-size: 11px; color: var(--text-dim); margin-bottom: 2px; }
-.lm-v { font-size: 12.5px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
-.lm-task { background: color-mix(in srgb, var(--accent) 6%, var(--bg-raised)); }
-.lm-model { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
-.lm-model.run { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
-.lm-big { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; color: var(--accent); line-height: 1.2; }
-.lm-sub { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
-.lm-side { border-style: dashed; background: transparent; }
-.lm-final { border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 5%, var(--bg-raised)); margin-top: 6px; }
-.lm-tool {
-  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-raised); padding: 8px 11px; cursor: pointer;
-  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+.lm-task, .lm-model, .lm-final { cursor: pointer; }
+.lm-task:hover, .lm-model:hover, .lm-final:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.lm-k { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; letter-spacing: .02em; }
+.lm-v { font-size: 13px; line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+.lm-down { width: 1px; height: 18px; margin: 0 auto; background: var(--border); position: relative; }
+.lm-down::after { content: ''; position: absolute; left: -3px; bottom: -1px; border: 3.5px solid transparent; border-top: 4px solid var(--border); border-bottom: 0; }
+/* 模型和工具是一个整体：一圈浅色底把它们框成「循环」 */
+.lm-loop {
+  border-radius: 16px; padding: 8px; background: color-mix(in srgb, var(--accent) 5%, var(--bg-sunken));
+  border: 1px solid color-mix(in srgb, var(--accent) 14%, var(--border));
 }
-.lm-tool.bad { border-color: color-mix(in srgb, var(--err) 35%, var(--border)); }
-.lm-tool.on { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent); }
-.lm-tn { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.lm-name { font-family: var(--mono); font-size: 13px; font-weight: 700; }
-.lm-cnt { font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.lm-ts { font-size: 11px; color: var(--text-dim); }
+.lm-model.run { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+.lm-modelline { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.lm-modelline b { font-size: 22px; font-weight: 700; color: var(--accent); letter-spacing: -0.02em; line-height: 1.1; }
+.lm-modelline span { color: var(--text-dim); font-size: 12px; margin-left: 6px; }
+.lm-cycle {
+  display: flex; justify-content: space-between; padding: 5px 18px; font-size: 11px; color: color-mix(in srgb, var(--accent) 70%, var(--text-dim));
+}
+.lm-tools { padding: 10px 6px 6px; }
+.lm-tools > .lm-k { padding: 0 8px; }
+.lm-row {
+  display: grid; grid-template-columns: minmax(70px, 110px) minmax(40px, 1fr) 36px 64px 76px; gap: 10px; align-items: center;
+  padding: 6px 8px; border-radius: 8px; cursor: pointer; font-size: 12.5px;
+}
+.lm-row:hover { background: var(--bg-sunken); }
+.lm-row.on { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.lm-name { font-family: var(--mono); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lm-bar { height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--text-dim) 12%, transparent); overflow: hidden; }
+.lm-bar i { display: block; height: 100%; border-radius: 3px; background: color-mix(in srgb, var(--accent) 70%, transparent); }
+.lm-cnt { text-align: right; font-weight: 650; font-variant-numeric: tabular-nums; }
+.lm-time { text-align: right; color: var(--text-dim); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lm-flag { text-align: right; }
 .lm-fail {
-  appearance: none; font: inherit; font-size: 11px; font-weight: 650; color: var(--err); cursor: pointer;
-  background: color-mix(in srgb, var(--err) 10%, transparent); border: 1px solid color-mix(in srgb, var(--err) 30%, transparent);
-  border-radius: 999px; padding: 0 7px;
+  appearance: none; font: inherit; font-size: 11px; color: var(--err); cursor: pointer; white-space: nowrap;
+  background: transparent; border: 1px solid color-mix(in srgb, var(--err) 35%, transparent); border-radius: 999px; padding: 0 7px;
 }
-.lm-fail.on, .lm-fail:hover { background: var(--err); color: #fff; }
-.lm-bar { height: 4px; border-radius: 2px; background: var(--bg-sunken); overflow: hidden; }
-.lm-bar i { display: block; height: 100%; background: color-mix(in srgb, var(--text-dim) 55%, transparent); }
-.lm-tool.bad .lm-bar i { background: color-mix(in srgb, var(--err) 60%, transparent); }
-.lm-last, .lm-res { font-family: var(--mono); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lm-res { color: var(--text-dim); }
-.lm-more {
-  appearance: none; font: inherit; font-size: 11.5px; color: var(--text-dim); cursor: pointer; text-align: left;
-  background: transparent; border: 1px dashed var(--border); border-radius: 8px; padding: 5px 10px;
+.lm-fail:hover, .lm-fail.on { background: color-mix(in srgb, var(--err) 12%, transparent); }
+.lm-detail { margin: 0 8px 6px 8px; padding: 8px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); display: grid; gap: 4px; font-size: 11.5px; }
+.lm-detail > div { display: flex; gap: 8px; min-width: 0; }
+.lm-detail code { font-family: var(--mono); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.lm-detail code.dim { color: var(--text-dim); }
+.lm-dk { flex: none; color: var(--text-dim); font-size: 11px; }
+.lm-onces {
+  appearance: none; font: inherit; width: 100%; text-align: left; font-size: 11.5px; color: var(--text-dim); cursor: pointer;
+  background: transparent; border: 0; padding: 6px 8px; border-radius: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.lm-more:hover { color: var(--text); }
-.lm-none { font-size: 12px; color: var(--text-dim); padding: 8px 0; }
+.lm-onces:hover { background: var(--bg-sunken); color: var(--text); }
+.lm-none { font-size: 12px; color: var(--text-dim); padding: 10px 8px 4px; }
+.lm-final { border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
+.lm-final .lm-k { color: var(--ok); }
+.lm-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.lm-chip {
+  appearance: none; font: inherit; font-size: 11px; color: var(--text-dim); cursor: pointer;
+  background: transparent; border: 1px dashed var(--border); border-radius: 999px; padding: 2px 10px;
+}
+.lm-chip:hover { color: var(--text); border-style: solid; }
 .lm-filterbar {
-  position: relative; z-index: 1; margin-bottom: 12px; padding: 6px 10px; border-radius: 8px; font-size: 12px;
+  margin-bottom: 12px; padding: 6px 10px; border-radius: 8px; font-size: 12px;
   background: color-mix(in srgb, var(--accent) 9%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .lm-clear { appearance: none; font: inherit; font-size: 11.5px; margin-left: 6px; cursor: pointer; background: transparent; border: 0; color: var(--accent); text-decoration: underline; }
@@ -1258,10 +1267,6 @@ main:has(#breakPane:not([hidden])) #detailPane { display: none; }
 .tr.filtering .tr-round:not(.hit) { opacity: .35; }
 .tr.filtering .tr-round.hit .tr-rn { color: var(--accent); }
 
-/* 窄排法：任务、模型并排在上；工具一列排在下面，左边留出主干线的位置 */
-.lm.narrow .lm-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px 18px; }
-.lm.narrow .lm-mid { padding-top: 0; }
-.lm.narrow .lm-right { grid-column: 1 / -1; padding-left: 26px; padding-top: 10px; }
 .tm-filterbar {
   margin: 8px 10px 0; padding: 5px 10px; border-radius: 8px; font-size: 12px;
   background: color-mix(in srgb, var(--accent) 9%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
